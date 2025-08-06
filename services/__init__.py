@@ -14,6 +14,7 @@ from .lead_scorer import UnifiedLeadScorer
 from .voice_bot import UnifiedVoiceBot
 from .campaign_manager import UnifiedCampaignManager
 
+
 __all__ = [
     'AzureSpeechProcessor',
     'TwilioVoiceHandler', 
@@ -91,7 +92,7 @@ class ServiceHealthChecker:
         try:
             # Test with a simple completion
             response = conversation_engine.client.chat.completions.create(
-                model="gpt-4",
+                model="gpt-3.5-turbo",
                 messages=[{"role": "user", "content": "Test"}],
                 max_tokens=5
             )

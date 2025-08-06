@@ -7,7 +7,9 @@ from services.twilio_handler import TwilioVoiceHandler
 from services.conversation_engine import UnifiedConversationEngine
 from services.lead_scorer import UnifiedLeadScorer
 from models.prospect import ProspectManager
-from models.database import CallHistory, CallOutcome
+from models.database import CallHistory, CallOutcome, Prospect
+from utils.helpers import serialize_conversation_log, DateTimeEncoder
+import json
 
 class UnifiedVoiceBot:
     def __init__(self, config, db_manager):
@@ -46,8 +48,10 @@ class UnifiedVoiceBot:
         
         logging.info("Unified Voice Bot initialized successfully")
     
+    # Add this method to the UnifiedVoiceBot class in services/voice_bot.py
+
     async def initiate_call(self, phone_number: str, call_type: str = 'auto') -> Dict:
-        """Initiate a call with full integration"""
+        """Initiate a call with proper session management"""
         try:
             # Get prospect context
             prospect_context = self.prospect_manager.get_prospect_context(phone_number)
@@ -61,6 +65,9 @@ class UnifiedVoiceBot:
                 logging.warning(f"Attempt to call DNC number: {phone_number}")
                 return {'success': False, 'error': 'Number is on do not call list'}
             
+            # Increment contact attempts using prospect_id
+            self.prospect_manager.increment_contact_attempts(prospect_context['prospect_id'])
+            
             # Initiate Twilio call
             call_result = self.twilio_handler.initiate_outbound_call(
                 phone_number, prospect_context
@@ -69,11 +76,12 @@ class UnifiedVoiceBot:
             if not call_result['success']:
                 return call_result
             
-            # Initialize call state
+            # Initialize call state with prospect_id for database operations
             call_sid = call_result['call_sid']
             self.active_calls[call_sid] = {
                 'phone_number': phone_number,
                 'prospect_context': prospect_context,
+                'prospect_id': prospect_context['prospect_id'],  # Store ID separately
                 'call_type': call_type,
                 'conversation_history': [],
                 'start_time': datetime.utcnow(),
@@ -82,16 +90,104 @@ class UnifiedVoiceBot:
                 'answered_by_human': False
             }
             
-            # Update prospect contact attempt
-            prospect_context['prospect'].contact_attempts += 1
-            self.db_manager.get_session().commit()
-            
             logging.info(f"Call initiated successfully: {call_sid} to {phone_number}")
             return call_result
             
         except Exception as e:
             logging.error(f"Error initiating call: {str(e)}")
             return {'success': False, 'error': str(e)}
+
+    # Update the _save_call_results method in services/voice_bot.py
+
+
+
+    async def _save_call_results(self, call_sid: str, call_state: Dict, call_results: Dict, reason: str):
+        """Save call results with proper JSON serialization"""
+        try:
+            prospect_id = call_state['prospect_id']
+            
+            # Serialize conversation history properly
+            conversation_log = serialize_conversation_log(call_state['conversation_history'])
+            
+            # Serialize component scores (ensure it's JSON serializable)
+            component_scores = call_results['scoring_result'].get('component_scores', {})
+            if component_scores:
+                # Ensure all values are JSON serializable
+                component_scores = {k: float(v) if isinstance(v, (int, float)) else v 
+                                for k, v in component_scores.items()}
+            
+            # Create call history record using a new session
+            session = self.db_manager.get_session()
+            try:
+                call_record = CallHistory(
+                    prospect_id=prospect_id,
+                    call_sid=call_sid,
+                    call_type=call_state['call_type'],
+                    call_duration=int(call_results['conversation_data']['call_duration']),
+                    call_outcome=call_results.get('call_outcome', 'completed'),
+                    conversation_log=conversation_log,  # Use serialized version
+                    conversation_summary=call_results.get('conversation_summary', ''),
+                    qualification_score=float(call_results['scoring_result']['final_score']),
+                    component_scores=component_scores,  # Use serialized version
+                    next_action=self._determine_next_action(call_results['scoring_result']),
+                    called_at=call_state['start_time'],
+                    completed_at=datetime.utcnow()
+                )
+                
+                # Add recording URL if available
+                if call_results.get('call_details'):
+                    recordings = self.twilio_handler.get_call_recordings(call_sid)
+                    if recordings:
+                        call_record.recording_url = recordings[0]['media_url']
+                        call_record.recording_duration = recordings[0]['duration']
+                
+                session.add(call_record)
+                session.commit()
+                
+                logging.info(f"Call results saved for {call_sid}")
+                
+            except Exception as e:
+                logging.error(f"Error saving call record: {str(e)}")
+                session.rollback()
+                raise
+            finally:
+                session.close()
+                
+        except Exception as e:
+            logging.error(f"Error saving call results: {str(e)}")
+
+
+
+    async def _update_prospect_after_call(self, call_state: Dict, call_results: Dict):
+        """Update prospect after call with proper session management"""
+        try:
+            prospect_id = call_state['prospect_id']
+            
+            # Update prospect scores using the prospect manager
+            self.prospect_manager.update_prospect_score(
+                prospect_id,
+                call_results['scoring_result']['final_score'],
+                call_results['scoring_result']['component_scores']
+            )
+            
+            # Update call status using separate session
+            session = self.db_manager.get_session()
+            try:
+                prospect = session.query(Prospect).filter(Prospect.id == prospect_id).first()
+                if prospect:
+                    prospect.call_status = 'completed'
+                    prospect.last_contacted = datetime.utcnow()
+                    session.commit()
+            except Exception as e:
+                logging.error(f"Error updating prospect call status: {str(e)}")
+                session.rollback()
+            finally:
+                session.close()
+            
+        except Exception as e:
+            logging.error(f"Error updating prospect after call: {str(e)}")
+    
+
     
     async def handle_webhook_call(self, call_sid: str, request_data: Dict) -> str:
         """Handle incoming webhook from Twilio"""
@@ -366,77 +462,7 @@ class UnifiedVoiceBot:
                 'scoring_result': {'final_score': 0, 'component_scores': {}},
                 'call_outcome': CallOutcome.FAILED.value
             }
-    
-    async def _save_call_results(self, call_sid: str, call_state: Dict, call_results: Dict, reason: str):
-        """Save comprehensive call results to database"""
-        try:
-            prospect = call_state['prospect_context']['prospect']
-            
-            # Create call history record
-            call_record = CallHistory(
-                prospect_id=prospect.id,
-                call_sid=call_sid,
-                call_type=call_state['call_type'],
-                call_duration=int(call_results['conversation_data']['call_duration']),
-                call_outcome=call_results['call_outcome'],
-                conversation_log=call_state['conversation_history'],
-                conversation_summary=call_results['conversation_summary'],
-                qualification_score=call_results['scoring_result']['final_score'],
-                component_scores=call_results['scoring_result']['component_scores'],
-                next_action=self._determine_next_action(call_results['scoring_result']),
-                called_at=call_state['start_time'],
-                completed_at=datetime.utcnow()
-            )
-            
-            # Add recording URL if available
-            if call_results.get('call_details'):
-                recordings = self.twilio_handler.get_call_recordings(call_sid)
-                if recordings:
-                    call_record.recording_url = recordings[0]['media_url']
-                    call_record.recording_duration = recordings[0]['duration']
-            
-            # Save to database
-            session = self.db_manager.get_session()
-            session.add(call_record)
-            session.commit()
-            
-            logging.info(f"Call results saved for {call_sid}")
-            
-        except Exception as e:
-            logging.error(f"Error saving call results: {str(e)}")
-            self.db_manager.get_session().rollback()
-    
-    async def _update_prospect_after_call(self, call_state: Dict, call_results: Dict):
-        """Update prospect information after call completion"""
-        try:
-            prospect = call_state['prospect_context']['prospect']
-            
-            # Update prospect scores and status
-            self.prospect_manager.update_prospect_score(
-                prospect.id,
-                call_results['scoring_result']['final_score'],
-                call_results['scoring_result']['component_scores']
-            )
-            
-            # Update call status
-            prospect.call_status = 'completed'
-            prospect.last_contacted = datetime.utcnow()
-            
-            # Set next action based on score
-            next_action = self._determine_next_action(call_results['scoring_result'])
-            
-            # Schedule follow-up if needed
-            if next_action == 'callback_scheduled':
-                # Schedule callback in 1 week
-                callback_time = datetime.utcnow() + timedelta(days=7)
-                # This would integrate with your task scheduler
-                
-            self.db_manager.get_session().commit()
-            
-        except Exception as e:
-            logging.error(f"Error updating prospect after call: {str(e)}")
-            self.db_manager.get_session().rollback()
-    
+      
     def _determine_next_action(self, scoring_result: Dict) -> str:
         """Determine next action based on comprehensive scoring"""
         score = scoring_result['final_score']

@@ -496,6 +496,73 @@ def validate_campaign_params(params: Dict[str, Any]) -> Dict[str, Any]:
     
     return validated
 
+# Add this to utils/helpers.py
+
+import json
+from datetime import datetime
+from decimal import Decimal
+
+class DateTimeEncoder(json.JSONEncoder):
+    """JSON encoder that handles datetime objects"""
+    
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        elif isinstance(obj, Decimal):
+            return float(obj)
+        return super().default(obj)
+
+def serialize_conversation_log(conversation_history):
+    """Serialize conversation history for database storage"""
+    try:
+        # Convert conversation history to JSON-serializable format
+        serializable_history = []
+        
+        for exchange in conversation_history:
+            serializable_exchange = {}
+            for key, value in exchange.items():
+                if isinstance(value, datetime):
+                    serializable_exchange[key] = value.isoformat()
+                elif key == 'sentiment' and isinstance(value, dict):
+                    # Handle sentiment objects
+                    serializable_exchange[key] = value
+                else:
+                    serializable_exchange[key] = value
+            serializable_history.append(serializable_exchange)
+        
+        return serializable_history
+        
+    except Exception as e:
+        logging.error(f"Error serializing conversation log: {str(e)}")
+        return []
+
+def deserialize_conversation_log(conversation_log):
+    """Deserialize conversation history from database"""
+    try:
+        if not conversation_log:
+            return []
+        
+        # Convert ISO datetime strings back to datetime objects
+        deserialized_history = []
+        
+        for exchange in conversation_log:
+            deserialized_exchange = {}
+            for key, value in exchange.items():
+                if key == 'timestamp' and isinstance(value, str):
+                    try:
+                        deserialized_exchange[key] = datetime.fromisoformat(value)
+                    except:
+                        deserialized_exchange[key] = value
+                else:
+                    deserialized_exchange[key] = value
+            deserialized_history.append(deserialized_exchange)
+        
+        return deserialized_history
+        
+    except Exception as e:
+        logging.error(f"Error deserializing conversation log: {str(e)}")
+        return conversation_log if conversation_log else []
+
 # Export all functions
 __all__ = [
     'validate_phone_number', 'format_phone_number', 'validate_email',

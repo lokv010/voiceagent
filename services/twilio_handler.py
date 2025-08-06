@@ -1,5 +1,5 @@
 from twilio.rest import Client
-from twilio.twiml import VoiceResponse, Gather
+from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.base.exceptions import TwilioException
 import logging
 from datetime import datetime

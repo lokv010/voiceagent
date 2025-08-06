@@ -1,0 +1,7 @@
+__pycache__/
+botenv/lib/
+botenv/lib/
+requirements.txt
+*.log
+chroma_knowledge/
+.env

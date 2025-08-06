@@ -189,7 +189,7 @@ class UnifiedConversationEngine:
         
         try:
             response = self.client.chat.completions.create(
-                model="gpt-4",
+                model="gpt-3.5-turbo",
                 messages=messages,
                 max_tokens=200,
                 temperature=0.7,

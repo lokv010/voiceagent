@@ -4,6 +4,10 @@ Utilities package for Voice Bot Project
 This package contains utility functions and helper classes.
 """
 
+"""
+Utilities package for Voice Bot Project
+"""
+
 from .helpers import (
     validate_phone_number,
     format_phone_number,
@@ -22,7 +26,10 @@ from .helpers import (
     create_pagination_info,
     validate_email,
     extract_keywords,
-    calculate_similarity_score
+    calculate_similarity_score,
+    DateTimeEncoder,  # ADD THIS
+    serialize_conversation_log,  # ADD THIS
+    deserialize_conversation_log  # ADD THIS
 )
 
 __all__ = [
@@ -43,8 +50,13 @@ __all__ = [
     'create_pagination_info',
     'validate_email',
     'extract_keywords',
-    'calculate_similarity_score'
+    'calculate_similarity_score',
+    'DateTimeEncoder',  
+    'serialize_conversation_log', 
+    'deserialize_conversation_log'
 ]
+
+# Rest of the file remains the same...
 
 # Package metadata
 __version__ = '1.0.0'

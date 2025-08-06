@@ -1,6 +1,7 @@
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, JSON, Float, Boolean, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session
+from sqlalchemy.orm import scoped_session, sessionmaker
 from datetime import datetime
 from enum import Enum
 import json
@@ -116,17 +117,43 @@ class Campaign(Base):
     campaign_config = Column(JSON)
     status = Column(String(20), default='created')
 
+# Add this method to the DatabaseManager class
+
+
+
 class DatabaseManager:
-    def __init__(self, database_url):
-        self.engine = create_engine(database_url)
+    def __init__(self, database_url, **kwargs):
+        self.database_url = database_url
+        
+        # Create engine with connection pooling
+        engine_options = {
+            'pool_size': 10,
+            'max_overflow': 20,
+            'pool_timeout': 30,
+            'pool_recycle': 3600,
+            'echo': False,
+            **kwargs
+        }
+        
+        self.engine = create_engine(database_url, **engine_options)
+        
+        # Create session factory
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
-        self.session = scoped_session(self.SessionLocal)
+        
+        # Create scoped session for thread safety
+        self.ScopedSession = scoped_session(self.SessionLocal)
         
         # Create tables
         Base.metadata.create_all(bind=self.engine)
     
     def get_session(self):
-        return self.session
+        """Get a new database session"""
+        return self.SessionLocal()
+    
+    def get_scoped_session(self):
+        """Get scoped session (thread-safe)"""
+        return self.ScopedSession()
     
     def close_session(self):
-        self.session.remove()
+        """Close scoped session"""
+        self.ScopedSession.remove()
