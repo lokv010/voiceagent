@@ -19,7 +19,8 @@ from config import Config
 
 # Import models
 from models import DatabaseManager
-from models.database import Prospect, CallHistory, Campaign
+from models.database import CallOutcome, CallbackRequest, Prospect, CallHistory, Campaign
+from models.database import add_inbound_call_support
 
 # Import services
 from services import (
@@ -29,9 +30,15 @@ from services import (
 )
 
 # Import utilities
+from services.inbound_conversation_engine import InboundConversationEngine
+from services.inbound_lead_scorer import InboundLeadScorer
+from services.inbound_agent_service import InboundCallHandler
+from services.callback_scheduler import CallbackScheduler
 from utils import log_api_call, timing_decorator
 
-from sqlalchemy import text
+from sqlalchemy import desc, text
+
+from utils.helpers import is_business_hours
 
 # Configure logging
 logging.basicConfig(
@@ -65,6 +72,12 @@ try:
     db_manager = DatabaseManager(app_config.SQLALCHEMY_DATABASE_URI)
     voice_bot = UnifiedVoiceBot(app_config, db_manager)
     campaign_manager = UnifiedCampaignManager(voice_bot, db_manager)
+    inbound_handler = InboundCallHandler(voice_bot, db_manager, app_config)
+    callback_scheduler = CallbackScheduler(voice_bot, db_manager, app_config)
+    inbound_conversation = InboundConversationEngine(voice_bot.conversation_engine)
+    inbound_scorer = InboundLeadScorer()
+    add_inbound_call_support(db_manager)
+
     logger.info("Voice agent services initialized successfully")
 except Exception as e:
     logger.error(f"Failed to initialize services: {e}")
@@ -227,6 +240,941 @@ def upload_cold_leads():
     except Exception as e:
         logger.error(f"Upload cold leads error: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+# Add these endpoints to your app.py file
+
+
+
+# Initialize inbound call handler after existing service initialization
+inbound_handler = InboundCallHandler(voice_bot, db_manager, app_config)
+
+# ==================== INBOUND CALL WEBHOOKS ====================
+
+@app.route('/inbound-webhook', methods=['POST'])
+@timing_decorator
+def inbound_voice_webhook():
+    """
+    Handle incoming calls - Direct from Twilio
+    This is the main entry point for inbound calls
+    """
+    try:
+        call_sid = request.form.get('CallSid')
+        from_number = request.form.get('From')
+        to_number = request.form.get('To')
+        call_status = request.form.get('CallStatus')
+        
+        logger.info(f"Inbound call webhook: {call_sid} - {call_status} from {from_number} to {to_number}")
+        
+        # Handle the inbound call
+        twiml_response = asyncio.run(
+            inbound_handler.handle_inbound_call(call_sid, request.form.to_dict())
+        )
+        
+        return twiml_response, 200, {'Content-Type': 'text/xml'}
+        
+    except Exception as e:
+        logger.error(f"Inbound voice webhook error: {str(e)}")
+        # Return fallback TwiML
+        fallback_twiml = '''<?xml version="1.0" encoding="UTF-8"?>
+        <Response>
+            <Say voice="Polly.Joanna">Thank you for calling. We're experiencing technical difficulties. Please try again later.</Say>
+            <Hangup/>
+        </Response>'''
+        return fallback_twiml, 200, {'Content-Type': 'text/xml'}
+
+@app.route('/inbound-webhook/process', methods=['POST'])
+@timing_decorator
+def process_inbound_speech():
+    """Process speech input from inbound caller"""
+    try:
+        call_sid = request.form.get('CallSid')
+        speech_result = request.form.get('SpeechResult', '')
+        confidence = request.form.get('Confidence', '0.0')
+        
+        logger.info(f"Inbound speech processing: {call_sid} - '{speech_result}' (confidence: {confidence})")
+        
+        # Process customer response
+        twiml_response = asyncio.run(
+            inbound_handler.handle_inbound_response(call_sid, request.form.to_dict())
+        )
+        
+        return twiml_response, 200, {'Content-Type': 'text/xml'}
+        
+    except Exception as e:
+        logger.error(f"Inbound speech processing error: {str(e)}")
+        fallback_twiml = '''<?xml version="1.0" encoding="UTF-8"?>
+        <Response>
+            <Say voice="Polly.Joanna">Thank you for calling. Have a great day!</Say>
+            <Hangup/>
+        </Response>'''
+        return fallback_twiml, 200, {'Content-Type': 'text/xml'}
+
+@app.route('/inbound-webhook/after-hours', methods=['POST'])
+@timing_decorator
+def handle_after_hours_options():
+    """Handle after-hours call options"""
+    try:
+        call_sid = request.form.get('CallSid')
+        digits = request.form.get('Digits', '')
+        speech_result = request.form.get('SpeechResult', '')
+        
+        logger.info(f"After hours option: {call_sid} - digits: '{digits}', speech: '{speech_result}'")
+        
+        # Check if they want to speak with AI assistant
+        if digits == '1' or 'assistant' in speech_result.lower():
+            # Start AI qualification even after hours
+            return asyncio.run(
+                inbound_handler._start_inbound_qualification(call_sid, voice_bot.active_calls.get(call_sid, {}))
+            ), 200, {'Content-Type': 'text/xml'}
+        else:
+            # Set up voicemail or callback
+            voicemail_twiml = '''<?xml version="1.0" encoding="UTF-8"?>
+            <Response>
+                <Say voice="Polly.Joanna">Please leave your name, number, and a brief message after the tone. We'll call you back during business hours.</Say>
+                <Record maxLength="120" timeout="10" action="/inbound-webhook/voicemail-complete"/>
+            </Response>'''
+            return voicemail_twiml, 200, {'Content-Type': 'text/xml'}
+        
+    except Exception as e:
+        logger.error(f"After hours options error: {str(e)}")
+        return '''<?xml version="1.0" encoding="UTF-8"?>
+        <Response>
+            <Say voice="Polly.Joanna">Thank you for calling. Goodbye.</Say>
+            <Hangup/>
+        </Response>''', 200, {'Content-Type': 'text/xml'}
+
+@app.route('/inbound-webhook/voicemail-complete', methods=['POST'])
+@timing_decorator
+def handle_voicemail_complete():
+    """Handle completed voicemail recording"""
+    try:
+        call_sid = request.form.get('CallSid')
+        recording_url = request.form.get('RecordingUrl')
+        recording_duration = request.form.get('RecordingDuration')
+        
+        logger.info(f"Voicemail completed: {call_sid} - {recording_duration}s - {recording_url}")
+        
+        # Save voicemail info to call history if call state exists
+        if call_sid in voice_bot.active_calls:
+            call_state = voice_bot.active_calls[call_sid]
+            call_state['conversation_history'].append({
+                'turn': call_state.get('current_turn', 0),
+                'type': 'customer',
+                'message': f"Voicemail left ({recording_duration}s)",
+                'recording_url': recording_url,
+                'timestamp': datetime.utcnow(),
+                'is_voicemail': True
+            })
+            
+            # Mark call as voicemail and save
+            call_state['call_outcome'] = CallOutcome.VOICEMAIL.value
+            
+            # Calculate and save results
+            call_results = asyncio.run(inbound_handler._calculate_inbound_call_results(call_sid, call_state))
+            asyncio.run(inbound_handler._save_inbound_call_results(call_sid, call_state, call_results, 'voicemail'))
+            
+            # Clean up
+            del voice_bot.active_calls[call_sid]
+        
+        # Thank them and hang up
+        return '''<?xml version="1.0" encoding="UTF-8"?>
+        <Response>
+            <Say voice="Polly.Joanna">Thank you for your message. We'll call you back during business hours. Have a great day!</Say>
+            <Hangup/>
+        </Response>''', 200, {'Content-Type': 'text/xml'}
+        
+    except Exception as e:
+        logger.error(f"Voicemail complete error: {str(e)}")
+        return '''<?xml version="1.0" encoding="UTF-8"?>
+        <Response>
+            <Say voice="Polly.Joanna">Thank you for calling. Goodbye.</Say>
+            <Hangup/>
+        </Response>''', 200, {'Content-Type': 'text/xml'}
+
+@app.route('/inbound-webhook/dnc-options', methods=['POST'])
+@timing_decorator
+def handle_dnc_options():
+    """Handle do-not-call list options"""
+    try:
+        call_sid = request.form.get('CallSid')
+        digits = request.form.get('Digits', '')
+        
+        if digits == '1':
+            # Connect to agent to remove from DNC
+            transfer_message = "Please hold while I connect you with an agent who can help remove you from our do not call list."
+            return voice_bot.twilio_handler.generate_transfer_twiml(
+                inbound_handler.agent_transfer_number,
+                transfer_message
+            ), 200, {'Content-Type': 'text/xml'}
+        else:
+            # Thank them and hang up
+            return '''<?xml version="1.0" encoding="UTF-8"?>
+            <Response>
+                <Say voice="Polly.Joanna">Thank you for calling. We'll keep you on our do not call list as requested. Have a great day.</Say>
+                <Hangup/>
+            </Response>''', 200, {'Content-Type': 'text/xml'}
+        
+    except Exception as e:
+        logger.error(f"DNC options error: {str(e)}")
+        return '''<?xml version="1.0" encoding="UTF-8"?>
+        <Response>
+            <Say voice="Polly.Joanna">Thank you for calling. Goodbye.</Say>
+            <Hangup/>
+        </Response>''', 200, {'Content-Type': 'text/xml'}
+
+@app.route('/inbound-webhook/status', methods=['POST'])
+def inbound_call_status():
+    """Handle inbound call status updates from Twilio"""
+    try:
+        call_sid = request.form.get('CallSid')
+        call_status = request.form.get('CallStatus')
+        duration = request.form.get('CallDuration')
+        
+        logger.info(f"Inbound call status update: {call_sid} - {call_status} (duration: {duration})")
+        
+        # Handle status update using existing method
+        asyncio.run(
+            voice_bot.handle_call_status_update(call_sid, call_status, request.form.to_dict())
+        )
+        
+        return jsonify({'status': 'received', 'call_sid': call_sid})
+        
+    except Exception as e:
+        logger.error(f"Inbound status webhook error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+# ==================== INBOUND CALL MANAGEMENT APIs ====================
+
+@app.route('/api/inbound/stats', methods=['GET'])
+def get_inbound_stats():
+    """Get inbound call statistics"""
+    try:
+        # Get date range
+        days_back = int(request.args.get('days_back', 7))
+        start_date = datetime.utcnow() - timedelta(days=days_back)
+        
+        session = db_manager.get_session()
+        
+        # Get inbound call stats
+        inbound_calls = session.query(CallHistory).filter(
+            CallHistory.call_type == 'inbound',
+            CallHistory.called_at >= start_date
+        ).all()
+        
+        # Calculate stats
+        total_inbound = len(inbound_calls)
+        completed_calls = len([c for c in inbound_calls if c.call_outcome == 'completed'])
+        voicemails = len([c for c in inbound_calls if c.call_outcome == 'voicemail'])
+        transfers = len([c for c in inbound_calls if 'transfer' in (c.notes or '')])
+        
+        avg_duration = sum(c.call_duration or 0 for c in inbound_calls) / total_inbound if total_inbound > 0 else 0
+        avg_score = sum(c.qualification_score or 0 for c in inbound_calls) / total_inbound if total_inbound > 0 else 0
+        
+        qualified_leads = len([c for c in inbound_calls if (c.qualification_score or 0) >= 70])
+        
+        # Business hours vs after hours breakdown
+        business_calls = 0
+        after_hours_calls = 0
+        
+        for call in inbound_calls:
+            if call.called_at:
+                if is_business_hours(call.called_at):
+                    business_calls += 1
+                else:
+                    after_hours_calls += 1
+        
+        stats = {
+            'total_inbound_calls': total_inbound,
+            'completed_calls': completed_calls,
+            'voicemails': voicemails,
+            'transfers_requested': transfers,
+            'qualified_leads': qualified_leads,
+            'avg_call_duration': round(avg_duration, 1),
+            'avg_qualification_score': round(avg_score, 1),
+            'business_hours_calls': business_calls,
+            'after_hours_calls': after_hours_calls,
+            'conversion_rate': round((qualified_leads / completed_calls * 100) if completed_calls > 0 else 0, 1),
+            'completion_rate': round((completed_calls / total_inbound * 100) if total_inbound > 0 else 0, 1)
+        }
+        
+        session.close()
+        return jsonify(stats)
+        
+    except Exception as e:
+        logger.error(f"Get inbound stats error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/inbound/recent', methods=['GET'])
+def get_recent_inbound_calls():
+    """Get recent inbound calls"""
+    try:
+        limit = int(request.args.get('limit', 50))
+        
+        session = db_manager.get_session()
+        
+        # Get recent inbound calls with prospect info
+        recent_calls = session.query(CallHistory).filter(
+            CallHistory.call_type == 'inbound'
+        ).order_by(desc(CallHistory.called_at)).limit(limit).all()
+        
+        calls_data = []
+        for call in recent_calls:
+            # Get prospect info
+            prospect = session.query(Prospect).filter(Prospect.id == call.prospect_id).first()
+            
+            call_data = {
+                'id': call.id,
+                'call_sid': call.call_sid,
+                'prospect_id': call.prospect_id,
+                'prospect_name': prospect.name if prospect else 'Unknown Caller',
+                'prospect_phone': prospect.phone_number if prospect else 'Unknown',
+                'call_duration': call.call_duration,
+                'call_outcome': call.call_outcome,
+                'qualification_score': call.qualification_score,
+                'called_at': call.called_at.isoformat() if call.called_at else None,
+                'conversation_summary': call.conversation_summary,
+                'next_action': call.next_action
+            }
+            calls_data.append(call_data)
+        
+        session.close()
+        return jsonify({'calls': calls_data})
+        
+    except Exception as e:
+        logger.error(f"Get recent inbound calls error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/inbound/configure', methods=['POST'])
+def configure_inbound_settings():
+    """Configure inbound call settings"""
+    try:
+        settings = request.get_json()
+        
+        # Update inbound handler settings
+        if 'business_hours' in settings:
+            inbound_handler.business_hours.update(settings['business_hours'])
+        
+        if 'agent_transfer_number' in settings:
+            inbound_handler.agent_transfer_number = settings['agent_transfer_number']
+        
+        if 'max_queue_time' in settings:
+            inbound_handler.max_queue_time = int(settings['max_queue_time'])
+        
+        # Save settings to database or config file
+        # Implementation depends on your preference for persistence
+        
+        return jsonify({
+            'status': 'updated',
+            'settings': {
+                'business_hours': inbound_handler.business_hours,
+                'agent_transfer_number': inbound_handler.agent_transfer_number,
+                'max_queue_time': inbound_handler.max_queue_time
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Configure inbound settings error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/inbound/active', methods=['GET'])
+def get_active_inbound_calls():
+    """Get currently active inbound calls"""
+    try:
+        active_inbound = []
+        
+        for call_sid, call_state in voice_bot.active_calls.items():
+            if call_state.get('call_type') == 'inbound':
+                active_inbound.append({
+                    'call_sid': call_sid,
+                    'phone_number': call_state['phone_number'],
+                    'prospect_name': call_state['prospect_context']['prospect'].name or 'Unknown',
+                    'start_time': call_state['start_time'].isoformat(),
+                    'current_turn': call_state['current_turn'],
+                    'inbound_reason': call_state.get('inbound_reason', 'unknown'),
+                    'transfer_requested': call_state.get('transfer_requested', False),
+                    'duration_seconds': int((datetime.utcnow() - call_state['start_time']).total_seconds())
+                })
+        
+        return jsonify({
+            'active_calls': active_inbound,
+            'count': len(active_inbound)
+        })
+        
+    except Exception as e:
+        logger.error(f"Get active inbound calls error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+# Add these callback management endpoints to your app.py file
+
+from services.callback_scheduler import CallbackScheduler
+from datetime import datetime, timedelta
+
+# Initialize callback scheduler after existing services
+callback_scheduler = CallbackScheduler(voice_bot, db_manager, app_config)
+
+# ==================== CALLBACK MANAGEMENT APIs ====================
+
+@app.route('/api/callbacks/request', methods=['POST'])
+@timing_decorator
+def request_callback():
+    """Request a callback for a prospect"""
+    try:
+        data = request.get_json()
+        
+        # Validate required fields
+        prospect_id = data.get('prospect_id')
+        if not prospect_id:
+            return jsonify({'success': False, 'error': 'prospect_id required'}), 400
+        
+        # Prepare callback data
+        callback_data = {
+            'requested_time': data.get('requested_time'),
+            'time_preference': data.get('time_preference', 'anytime'),
+            'reason': data.get('reason', 'Callback requested'),
+            'urgency_level': data.get('urgency_level', 'normal'),
+            'source': data.get('source', 'manual'),
+            'notes': data.get('notes', ''),
+            'timezone': data.get('timezone', 'UTC')
+        }
+        
+        # Request the callback
+        result = asyncio.run(callback_scheduler.request_callback(prospect_id, callback_data))
+        
+        if result['success']:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Request callback error: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/callbacks/schedule/<int:callback_id>', methods=['POST'])
+@timing_decorator
+def schedule_callback(callback_id):
+    """Schedule a specific callback request"""
+    try:
+        data = request.get_json()
+        
+        # Get scheduling preferences
+        requested_time_str = data.get('requested_time')
+        if requested_time_str:
+            try:
+                requested_time = datetime.fromisoformat(requested_time_str.replace('Z', '+00:00'))
+            except ValueError:
+                return jsonify({'success': False, 'error': 'Invalid datetime format'}), 400
+        else:
+            requested_time = None
+        
+        # Update callback request with new time
+        session = db_manager.get_session()
+        callback_request = session.query(CallbackRequest).filter(
+            CallbackRequest.id == callback_id
+        ).first()
+        
+        if not callback_request:
+            session.close()
+            return jsonify({'success': False, 'error': 'Callback not found'}), 404
+        
+        if requested_time:
+            callback_request.requested_time = requested_time
+        
+        # Attempt to schedule
+        result = asyncio.run(callback_scheduler._schedule_callback(callback_id, session))
+        session.close()
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"Schedule callback error: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/callbacks/pending', methods=['GET'])
+def get_pending_callbacks():
+    """Get pending callback requests"""
+    try:
+        limit = int(request.args.get('limit', 50))
+        
+        callbacks = asyncio.run(callback_scheduler.get_pending_callbacks(limit))
+        
+        return jsonify({
+            'callbacks': callbacks,
+            'count': len(callbacks)
+        })
+        
+    except Exception as e:
+        logger.error(f"Get pending callbacks error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/callbacks/scheduled', methods=['GET'])
+def get_scheduled_callbacks():
+    """Get scheduled callbacks for a specific date"""
+    try:
+        date_str = request.args.get('date')
+        if date_str:
+            try:
+                date = datetime.fromisoformat(date_str).date()
+            except ValueError:
+                return jsonify({'error': 'Invalid date format'}), 400
+        else:
+            date = datetime.utcnow().date()
+        
+        callbacks = asyncio.run(callback_scheduler.get_scheduled_callbacks(date))
+        
+        return jsonify({
+            'callbacks': callbacks,
+            'date': date.isoformat(),
+            'count': len(callbacks)
+        })
+        
+    except Exception as e:
+        logger.error(f"Get scheduled callbacks error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/callbacks/execute/<int:callback_id>', methods=['POST'])
+@timing_decorator
+def execute_callback(callback_id):
+    """Execute a scheduled callback"""
+    try:
+        result = asyncio.run(callback_scheduler.execute_callback(callback_id))
+        
+        if result['success']:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Execute callback error: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/callbacks/reschedule/<int:callback_id>', methods=['POST'])
+@timing_decorator
+def reschedule_callback(callback_id):
+    """Reschedule a callback"""
+    try:
+        data = request.get_json()
+        
+        # Parse new time
+        new_time_str = data.get('new_time')
+        if not new_time_str:
+            return jsonify({'success': False, 'error': 'new_time required'}), 400
+        
+        try:
+            new_time = datetime.fromisoformat(new_time_str.replace('Z', '+00:00'))
+        except ValueError:
+            return jsonify({'success': False, 'error': 'Invalid datetime format'}), 400
+        
+        reason = data.get('reason', 'Rescheduled by user')
+        
+        result = asyncio.run(callback_scheduler.reschedule_callback(
+            callback_id, new_time, reason
+        ))
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"Reschedule callback error: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/callbacks/cancel/<int:callback_id>', methods=['POST'])
+@timing_decorator
+def cancel_callback(callback_id):
+    """Cancel a callback request"""
+    try:
+        data = request.get_json()
+        reason = data.get('reason', 'Cancelled by user')
+        
+        session = db_manager.get_session()
+        
+        callback_request = session.query(CallbackRequest).filter(
+            CallbackRequest.id == callback_id
+        ).first()
+        
+        if not callback_request:
+            session.close()
+            return jsonify({'success': False, 'error': 'Callback not found'}), 404
+        
+        # Update status
+        callback_request.status = 'cancelled'
+        callback_request.notes = f"{callback_request.notes or ''}\nCancelled: {reason}"
+        
+        session.commit()
+        session.close()
+        
+        return jsonify({
+            'success': True,
+            'callback_id': callback_id,
+            'status': 'cancelled'
+        })
+        
+    except Exception as e:
+        logger.error(f"Cancel callback error: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/callbacks/bulk-schedule', methods=['POST'])
+@timing_decorator
+def bulk_schedule_callbacks():
+    """Schedule multiple callbacks in bulk"""
+    try:
+        data = request.get_json()
+        callback_ids = data.get('callback_ids', [])
+        default_time_preference = data.get('time_preference', 'anytime')
+        
+        if not callback_ids:
+            return jsonify({'success': False, 'error': 'callback_ids required'}), 400
+        
+        results = []
+        session = db_manager.get_session()
+        
+        for callback_id in callback_ids:
+            try:
+                # Update time preference if provided
+                callback_request = session.query(CallbackRequest).filter(
+                    CallbackRequest.id == callback_id
+                ).first()
+                
+                if callback_request:
+                    # Set default time preference if not specified
+                    if not callback_request.requested_time:
+                        callback_request.requested_time = callback_scheduler._parse_callback_time(
+                            None, default_time_preference, 'UTC'
+                        )
+                    
+                    # Attempt to schedule
+                    result = asyncio.run(callback_scheduler._schedule_callback(callback_id, session))
+                    results.append({
+                        'callback_id': callback_id,
+                        'success': result['success'],
+                        'status': result.get('status'),
+                        'error': result.get('error')
+                    })
+                else:
+                    results.append({
+                        'callback_id': callback_id,
+                        'success': False,
+                        'error': 'Callback not found'
+                    })
+                    
+            except Exception as e:
+                results.append({
+                    'callback_id': callback_id,
+                    'success': False,
+                    'error': str(e)
+                })
+        
+        session.close()
+        
+        successful_schedules = len([r for r in results if r['success']])
+        
+        return jsonify({
+            'success': True,
+            'total_processed': len(callback_ids),
+            'successful_schedules': successful_schedules,
+            'results': results
+        })
+        
+    except Exception as e:
+        logger.error(f"Bulk schedule callbacks error: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/callbacks/stats', methods=['GET'])
+def get_callback_stats():
+    """Get callback statistics"""
+    try:
+        days_back = int(request.args.get('days_back', 7))
+        start_date = datetime.utcnow() - timedelta(days=days_back)
+        
+        session = db_manager.get_session()
+        
+        # Get all callbacks in the date range
+        callbacks = session.query(CallbackRequest).filter(
+            CallbackRequest.requested_at >= start_date
+        ).all()
+        
+        # Calculate stats
+        total_requests = len(callbacks)
+        scheduled_count = len([c for c in callbacks if c.status == 'scheduled'])
+        completed_count = len([c for c in callbacks if c.status == 'completed'])
+        pending_count = len([c for c in callbacks if c.status == 'pending'])
+        cancelled_count = len([c for c in callbacks if c.status == 'cancelled'])
+        
+        # Priority breakdown
+        priority_stats = {}
+        for priority in ['urgent', 'high', 'normal', 'low']:
+            priority_stats[priority] = len([c for c in callbacks if c.priority == priority])
+        
+        # Source breakdown
+        source_stats = {}
+        for callback in callbacks:
+            source = callback.request_source or 'unknown'
+            source_stats[source] = source_stats.get(source, 0) + 1
+        
+        # Completion rate
+        completion_rate = (completed_count / total_requests * 100) if total_requests > 0 else 0
+        
+        # Average time to schedule
+        scheduled_callbacks = [c for c in callbacks if c.scheduled_at and c.requested_at]
+        avg_time_to_schedule = 0
+        if scheduled_callbacks:
+            total_seconds = sum(
+                (c.scheduled_at - c.requested_at).total_seconds() 
+                for c in scheduled_callbacks
+            )
+            avg_time_to_schedule = total_seconds / len(scheduled_callbacks) / 3600  # Convert to hours
+        
+        stats = {
+            'total_requests': total_requests,
+            'scheduled': scheduled_count,
+            'completed': completed_count,
+            'pending': pending_count,
+            'cancelled': cancelled_count,
+            'completion_rate': round(completion_rate, 1),
+            'avg_time_to_schedule_hours': round(avg_time_to_schedule, 1),
+            'priority_breakdown': priority_stats,
+            'source_breakdown': source_stats,
+            'date_range': {
+                'start': start_date.isoformat(),
+                'end': datetime.utcnow().isoformat(),
+                'days': days_back
+            }
+        }
+        
+        session.close()
+        return jsonify(stats)
+        
+    except Exception as e:
+        logger.error(f"Get callback stats error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/callbacks/available-slots', methods=['GET'])
+def get_available_callback_slots():
+    """Get available time slots for callbacks"""
+    try:
+        # Parse query parameters
+        date_str = request.args.get('date')
+        if date_str:
+            try:
+                target_date = datetime.fromisoformat(date_str).date()
+            except ValueError:
+                return jsonify({'error': 'Invalid date format'}), 400
+        else:
+            target_date = datetime.utcnow().date()
+        
+        duration_hours = int(request.args.get('duration_hours', 8))  # Search window
+        
+        # Generate time slots for the day
+        start_time = datetime.combine(target_date, datetime.min.time().replace(hour=9))
+        end_time = start_time + timedelta(hours=duration_hours)
+        
+        available_slots = []
+        current_time = start_time
+        
+        session = db_manager.get_session()
+        
+        while current_time < end_time:
+            # Check if slot is available
+            is_available = asyncio.run(callback_scheduler._is_slot_available(current_time, session))
+            
+            if is_available:
+                available_slots.append({
+                    'time': current_time.isoformat(),
+                    'display_time': current_time.strftime('%I:%M %p'),
+                    'is_business_hours': is_business_hours(current_time)
+                })
+            
+            current_time += timedelta(minutes=30)  # 30-minute slots
+        
+        session.close()
+        
+        return jsonify({
+            'date': target_date.isoformat(),
+            'available_slots': available_slots,
+            'total_slots': len(available_slots)
+        })
+        
+    except Exception as e:
+        logger.error(f"Get available slots error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/callbacks/configure', methods=['POST'])
+@timing_decorator
+def configure_callback_settings():
+    """Configure callback scheduling settings"""
+    try:
+        data = request.get_json()
+        
+        # Update callback scheduler configuration
+        if 'default_callback_window' in data:
+            callback_scheduler.scheduling_config['default_callback_window'] = int(data['default_callback_window'])
+        
+        if 'max_callbacks_per_hour' in data:
+            callback_scheduler.scheduling_config['max_callbacks_per_hour'] = int(data['max_callbacks_per_hour'])
+        
+        if 'min_callback_gap' in data:
+            callback_scheduler.scheduling_config['min_callback_gap'] = int(data['min_callback_gap'])
+        
+        if 'business_hours_only' in data:
+            callback_scheduler.scheduling_config['business_hours_only'] = bool(data['business_hours_only'])
+        
+        if 'time_preferences' in data:
+            callback_scheduler.time_preferences.update(data['time_preferences'])
+        
+        # Save configuration to database or config file
+        # Implementation depends on your preference for persistence
+        
+        return jsonify({
+            'success': True,
+            'message': 'Callback settings updated',
+            'current_config': callback_scheduler.scheduling_config
+        })
+        
+    except Exception as e:
+        logger.error(f"Configure callback settings error: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/callbacks/export', methods=['GET'])
+def export_callbacks():
+    """Export callback data for reporting"""
+    try:
+        # Parse query parameters
+        start_date_str = request.args.get('start_date')
+        end_date_str = request.args.get('end_date')
+        status_filter = request.args.get('status')
+        format_type = request.args.get('format', 'json')  # json or csv
+        
+        # Parse dates
+        if start_date_str:
+            start_date = datetime.fromisoformat(start_date_str)
+        else:
+            start_date = datetime.utcnow() - timedelta(days=30)
+        
+        if end_date_str:
+            end_date = datetime.fromisoformat(end_date_str)
+        else:
+            end_date = datetime.utcnow()
+        
+        session = db_manager.get_session()
+        
+        # Build query
+        query = session.query(CallbackRequest).filter(
+            CallbackRequest.requested_at >= start_date,
+            CallbackRequest.requested_at <= end_date
+        )
+        
+        if status_filter:
+            query = query.filter(CallbackRequest.status == status_filter)
+        
+        callbacks = query.order_by(CallbackRequest.requested_at.desc()).all()
+        
+        # Prepare export data
+        export_data = []
+        for callback in callbacks:
+            # Get prospect info
+            prospect = session.query(Prospect).filter(
+                Prospect.id == callback.prospect_id
+            ).first()
+            
+            callback_data = {
+                'callback_id': callback.id,
+                'prospect_id': callback.prospect_id,
+                'prospect_name': prospect.name if prospect else 'Unknown',
+                'prospect_phone': prospect.phone_number if prospect else 'Unknown',
+                'prospect_email': prospect.email if prospect else '',
+                'requested_at': callback.requested_at.isoformat() if callback.requested_at else '',
+                'requested_time': callback.requested_time.isoformat() if callback.requested_time else '',
+                'scheduled_at': callback.scheduled_at.isoformat() if callback.scheduled_at else '',
+                'completed_at': callback.completed_at.isoformat() if callback.completed_at else '',
+                'status': callback.status,
+                'priority': callback.priority,
+                'reason': callback.reason,
+                'request_source': callback.request_source,
+                'assigned_agent': callback.assigned_agent,
+                'outcome': callback.outcome,
+                'notes': callback.notes
+            }
+            export_data.append(callback_data)
+        
+        session.close()
+        
+        if format_type == 'csv':
+            # Convert to CSV format
+            import csv
+            import io
+            
+            output = io.StringIO()
+            writer = csv.DictWriter(output, fieldnames=export_data[0].keys() if export_data else [])
+            writer.writeheader()
+            writer.writerows(export_data)
+            
+            csv_content = output.getvalue()
+            output.close()
+            
+            response = app.response_class(
+                csv_content,
+                mimetype='text/csv',
+                headers={'Content-Disposition': f'attachment; filename=callbacks_{start_date.date()}_to_{end_date.date()}.csv'}
+            )
+            return response
+        else:
+            # Return JSON
+            return jsonify({
+                'callbacks': export_data,
+                'total_count': len(export_data),
+                'date_range': {
+                    'start': start_date.isoformat(),
+                    'end': end_date.isoformat()
+                },
+                'filters': {
+                    'status': status_filter
+                }
+            })
+        
+    except Exception as e:
+        logger.error(f"Export callbacks error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+# ==================== WEBHOOK INTEGRATION FOR CALLBACKS ====================
+
+@app.route('/api/callbacks/webhook/<int:callback_id>/confirm', methods=['POST'])
+@timing_decorator
+def confirm_callback_webhook(callback_id):
+    """Webhook endpoint for callback confirmations (e.g., from SMS/email)"""
+    try:
+        data = request.get_json() or request.form.to_dict()
+        
+        # Verify callback exists
+        session = db_manager.get_session()
+        callback_request = session.query(CallbackRequest).filter(
+            CallbackRequest.id == callback_id
+        ).first()
+        
+        if not callback_request:
+            session.close()
+            return jsonify({'success': False, 'error': 'Callback not found'}), 404
+        
+        # Update status based on confirmation
+        confirmed = data.get('confirmed', 'true').lower() in ['true', '1', 'yes']
+        
+        if confirmed:
+            callback_request.status = 'confirmed'
+            callback_request.notes = f"{callback_request.notes or ''}\nConfirmed via webhook"
+        else:
+            # Handle rejection - offer reschedule
+            callback_request.status = 'pending'
+            callback_request.notes = f"{callback_request.notes or ''}\nRejected via webhook - needs reschedule"
+        
+        session.commit()
+        session.close()
+        
+        return jsonify({
+            'success': True,
+            'callback_id': callback_id,
+            'status': callback_request.status,
+            'confirmed': confirmed
+        })
+        
+    except Exception as e:
+        logger.error(f"Callback confirmation webhook error: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 # ==================== CAMPAIGN MANAGEMENT SERVICES ====================
 

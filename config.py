@@ -47,6 +47,25 @@ class Config:
     
     # Logging
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+
+
+    # Inbound Call Configuration
+    COMPANY_NAME = os.getenv('COMPANY_NAME', 'Your Company')
+    AGENT_TRANSFER_NUMBER = os.getenv('AGENT_TRANSFER_NUMBER', '+1234567890')
+    ENABLE_INBOUND_CALLS = os.getenv('ENABLE_INBOUND_CALLS', 'true').lower() == 'true'
+    
+    # Business Hours
+    BUSINESS_HOURS_START = os.getenv('BUSINESS_HOURS_START', '09:00')
+    BUSINESS_HOURS_END = os.getenv('BUSINESS_HOURS_END', '17:00')
+    BUSINESS_TIMEZONE = os.getenv('BUSINESS_TIMEZONE', 'UTC')
+    
+    # Call Queue Settings
+    MAX_QUEUE_TIME = int(os.getenv('MAX_QUEUE_TIME', '300'))
+    MAX_CONCURRENT_CALLS = int(os.getenv('MAX_CONCURRENT_CALLS', '10'))
+    
+    # Callback Settings
+    ENABLE_CALLBACKS = os.getenv('ENABLE_CALLBACKS', 'true').lower() == 'true'
+    CALLBACK_CONFIRMATION_SMS = os.getenv('CALLBACK_CONFIRMATION_SMS', 'false').lower() == 'true'
     
     @staticmethod
     def validate_config():

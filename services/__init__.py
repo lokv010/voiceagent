@@ -4,6 +4,7 @@ Services package for Voice Bot Project
 This package contains all service classes for voice bot functionality.
 """
 
+from services.inbound_agent_service import InboundCallHandler
 from .azure_speech import AzureSpeechProcessor
 from .twilio_handler import TwilioVoiceHandler
 from .conversation_engine import (
@@ -22,13 +23,17 @@ __all__ = [
     'ConversationTemplates',
     'UnifiedLeadScorer',
     'UnifiedVoiceBot',
-    'UnifiedCampaignManager'
+    'UnifiedCampaignManager',
+    'InboundAgentService'
 ]
 
 # Package metadata
 __version__ = '1.0.0'
 __author__ = 'Voice Bot Team'
 __description__ = 'Core services for AI-powered voice bot functionality'
+
+
+
 
 # Service factory functions
 def create_voice_bot(config, db_manager):
@@ -56,6 +61,26 @@ def create_campaign_manager(voice_bot, db_manager):
         UnifiedCampaignManager: Configured campaign manager instance
     """
     return UnifiedCampaignManager(voice_bot, db_manager)
+
+def create_inbound_agent_service(config, db_manager, existing_services=None):
+    """
+    Factory function to create an inbound agent service instance.
+    
+    Args:
+        config: Application configuration object
+        db_manager: Database manager instance
+        existing_services: Dict of existing services to reuse
+    
+    Returns:
+        InboundAgentService: Configured inbound agent service instance
+    """
+    return InboundAgentService(
+        config=config,
+        db_manager=db_manager,
+        voice_service=existing_services.get('voice') if existing_services else None,
+        ai_service=existing_services.get('ai') if existing_services else None,
+        sentiment_service=existing_services.get('sentiment') if existing_services else None
+    )
 
 # Service health check utilities
 class ServiceHealthChecker:
