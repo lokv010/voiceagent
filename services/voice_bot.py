@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta
+import os
 from typing import Dict, List, Optional
 from services.azure_speech import AzureSpeechProcessor
 from services.twilio_handler import TwilioVoiceHandler
@@ -34,6 +35,7 @@ class UnifiedVoiceBot:
             openai_api_key=config.OPENAI_API_KEY
         )
         
+        
         self.lead_scorer = UnifiedLeadScorer()
         
         self.prospect_manager = ProspectManager(db_manager)
@@ -47,7 +49,23 @@ class UnifiedVoiceBot:
         self.active_calls = {}
         
         logging.info("Unified Voice Bot initialized successfully")
+    # Add new method for inbound call state management
+    def get_call_state(self, call_sid: str) -> Dict:
+        """Get call state from either outbound or inbound active calls"""
+        return self.active_calls.get(call_sid) or self.inbound_active_calls.get(call_sid)
     
+    def set_call_state(self, call_sid: str, call_state: Dict):
+        """Set call state in appropriate collection"""
+        if call_state.get('call_type') == 'inbound':
+            self.inbound_active_calls[call_sid] = call_state
+        else:
+            self.active_calls[call_sid] = call_state
+    
+    def remove_call_state(self, call_sid: str):
+        """Remove call state from all collections"""
+        self.active_calls.pop(call_sid, None)
+        self.inbound_active_calls.pop(call_sid, None)
+        self.call_cleanup_tasks.pop(call_sid, None)
     # Add this method to the UnifiedVoiceBot class in services/voice_bot.py
 
     async def initiate_call(self, phone_number: str, call_type: str = 'auto') -> Dict:
@@ -102,9 +120,12 @@ class UnifiedVoiceBot:
 
 
     async def _save_call_results(self, call_sid: str, call_state: Dict, call_results: Dict, reason: str):
-        """Save call results with proper JSON serialization"""
+        """Save call results with proper JSON serialization - supports both inbound and outbound"""
         try:
-            prospect_id = call_state['prospect_id']
+            prospect_id = call_state.get('prospect_id')
+            if not prospect_id:
+                logging.warning(f"No prospect_id found for call {call_sid}")
+                return
             
             # Serialize conversation history properly
             conversation_log = serialize_conversation_log(call_state['conversation_history'])
@@ -112,7 +133,6 @@ class UnifiedVoiceBot:
             # Serialize component scores (ensure it's JSON serializable)
             component_scores = call_results['scoring_result'].get('component_scores', {})
             if component_scores:
-                # Ensure all values are JSON serializable
                 component_scores = {k: float(v) if isinstance(v, (int, float)) else v 
                                 for k, v in component_scores.items()}
             
@@ -122,15 +142,15 @@ class UnifiedVoiceBot:
                 call_record = CallHistory(
                     prospect_id=prospect_id,
                     call_sid=call_sid,
-                    call_type=call_state['call_type'],
-                    call_duration=int(call_results['conversation_data']['call_duration']),
+                    call_type=call_state.get('call_type', 'outbound'),
+                    call_duration=int(call_results.get('conversation_data', {}).get('call_duration', 0)),
                     call_outcome=call_results.get('call_outcome', 'completed'),
-                    conversation_log=conversation_log,  # Use serialized version
+                    conversation_log=conversation_log,
                     conversation_summary=call_results.get('conversation_summary', ''),
-                    qualification_score=float(call_results['scoring_result']['final_score']),
-                    component_scores=component_scores,  # Use serialized version
+                    qualification_score=float(call_results['scoring_result'].get('final_score', 0)),
+                    component_scores=component_scores,
                     next_action=self._determine_next_action(call_results['scoring_result']),
-                    called_at=call_state['start_time'],
+                    called_at=call_state.get('start_time', datetime.utcnow()),
                     completed_at=datetime.utcnow()
                 )
                 
@@ -144,7 +164,7 @@ class UnifiedVoiceBot:
                 session.add(call_record)
                 session.commit()
                 
-                logging.info(f"Call results saved for {call_sid}")
+                logging.info(f"Call results saved for {call_sid} (type: {call_state.get('call_type', 'outbound')})")
                 
             except Exception as e:
                 logging.error(f"Error saving call record: {str(e)}")
@@ -161,13 +181,16 @@ class UnifiedVoiceBot:
     async def _update_prospect_after_call(self, call_state: Dict, call_results: Dict):
         """Update prospect after call with proper session management"""
         try:
-            prospect_id = call_state['prospect_id']
+            prospect_id = call_state.get('prospect_id')
+            if not prospect_id:
+                logging.warning("No prospect_id found, skipping prospect update")
+                return
             
             # Update prospect scores using the prospect manager
             self.prospect_manager.update_prospect_score(
                 prospect_id,
                 call_results['scoring_result']['final_score'],
-                call_results['scoring_result']['component_scores']
+                call_results['scoring_result'].get('component_scores', {})
             )
             
             # Update call status using separate session
@@ -178,6 +201,9 @@ class UnifiedVoiceBot:
                     prospect.call_status = 'completed'
                     prospect.last_contacted = datetime.utcnow()
                     session.commit()
+                    logging.info(f"Updated prospect {prospect_id} after call")
+                else:
+                    logging.warning(f"Prospect {prospect_id} not found for update")
             except Exception as e:
                 logging.error(f"Error updating prospect call status: {str(e)}")
                 session.rollback()
@@ -187,35 +213,50 @@ class UnifiedVoiceBot:
         except Exception as e:
             logging.error(f"Error updating prospect after call: {str(e)}")
     
+    # Add helper method for call cleanup
+    async def cleanup_call(self, call_sid: str, delay_seconds: int = 30):
+        """Schedule delayed cleanup of call state"""
+        try:
+            await asyncio.sleep(delay_seconds)
+            
+            # Check if call still exists and clean up
+            if call_sid in self.active_calls or call_sid in self.inbound_active_calls:
+                logging.info(f"Performing delayed cleanup for call: {call_sid}")
+                self.remove_call_state(call_sid)
+                
+        except Exception as e:
+            logging.error(f"Error in call cleanup: {e}")
+    
+    def schedule_call_cleanup(self, call_sid: str, delay_seconds: int = 30):
+        """Schedule background cleanup task"""
+        if call_sid not in self.call_cleanup_tasks:
+            task = asyncio.create_task(self.cleanup_call(call_sid, delay_seconds))
+            self.call_cleanup_tasks[call_sid] = task
+    
 
     
     async def handle_webhook_call(self, call_sid: str, request_data: Dict) -> str:
-        """Handle incoming webhook from Twilio"""
+        """Handle incoming webhook from Twilio - supports both inbound and outbound"""
         try:
-            if call_sid not in self.active_calls:
+            # Check both active call collections
+            call_state = self.get_call_state(call_sid)
+            
+            if not call_state:
                 logging.error(f"Call {call_sid} not found in active calls")
                 return self.twilio_handler.generate_twiml_response(
                     "I'm sorry, there was an error. Please try again later.", 
                     gather_input=False
                 )
             
-            call_state = self.active_calls[call_sid]
-            
-            # Handle machine detection
-            answered_by = request_data.get('AnsweredBy')
-            if answered_by == 'machine_start':
-                call_state['answered_by_human'] = False
-                return await self._handle_answering_machine(call_sid, call_state)
+            # Handle based on call type
+            if call_state.get('call_type') == 'inbound':
+                # For inbound calls, delegate to the inbound handler
+                # This method should not be called directly for inbound calls
+                # as they use the OpenAI handler, but keeping for safety
+                return await self._handle_inbound_fallback(call_sid, call_state, request_data)
             else:
-                call_state['answered_by_human'] = True
-            
-            # Handle based on call stage
-            if call_state['current_turn'] == 0:
-                # First interaction - send opening message
-                return await self._handle_opening_message(call_sid, call_state)
-            else:
-                # Process customer response
-                return await self._handle_customer_response(call_sid, call_state, request_data)
+                # Handle outbound calls as before
+                return await self._handle_outbound_call(call_sid, call_state, request_data)
                 
         except Exception as e:
             logging.error(f"Error handling webhook: {str(e)}")
@@ -223,6 +264,63 @@ class UnifiedVoiceBot:
                 "I'm sorry, there was a technical issue. Goodbye.", 
                 gather_input=False
             )
+        
+    async def _handle_inbound_fallback(self, call_sid: str, call_state: Dict, request_data: Dict) -> str:
+        """Fallback handler for inbound calls when OpenAI handler isn't available"""
+        try:
+            customer_speech = request_data.get('SpeechResult', '').strip()
+            
+            # Simple fallback responses for inbound calls
+            if not customer_speech:
+                return self.twilio_handler.generate_twiml_response(
+                    "I'm sorry, I didn't catch that. How can I help you today?",
+                    gather_input=True
+                )
+            
+            # Basic intent detection
+            speech_lower = customer_speech.lower()
+            
+            if any(word in speech_lower for word in ['human', 'agent', 'person']):
+                return self.twilio_handler.generate_transfer_twiml(
+                    os.getenv('AGENT_TRANSFER_NUMBER', '+12267537919'),
+                    "I'll connect you with a specialist right away."
+                )
+            
+            elif any(word in speech_lower for word in ['not interested', 'no thank']):
+                return self.twilio_handler.generate_twiml_response(
+                    "Thank you for your time. Have a great day!",
+                    gather_input=False
+                )
+            
+            else:
+                # General solar response
+                return self.twilio_handler.generate_twiml_response(
+                    "I'd be happy to help you explore solar options. Do you own your home?",
+                    gather_input=True
+                )
+                
+        except Exception as e:
+            logging.error(f"Error in inbound fallback: {e}")
+            return self.twilio_handler.generate_twiml_response(
+                "Thank you for calling. Goodbye!",
+                gather_input=False
+            )
+        
+    async def _handle_outbound_call(self, call_sid: str, call_state: Dict, request_data: Dict) -> str:
+        """Handle outbound calls (existing logic)"""
+        # Handle machine detection
+        answered_by = request_data.get('AnsweredBy')
+        if answered_by == 'machine_start':
+            call_state['answered_by_human'] = False
+            return await self._handle_answering_machine(call_sid, call_state)
+        else:
+            call_state['answered_by_human'] = True
+        
+        # Handle based on call stage
+        if call_state['current_turn'] == 0:
+            # First interaction - send opening message
+            return await self._handle_opening_message(call_sid, call_state)
+        
     
     async def _handle_answering_machine(self, call_sid: str, call_state: Dict) -> str:
         """Handle answering machine detection"""
@@ -296,81 +394,7 @@ class UnifiedVoiceBot:
                 gather_input=True
             )
     
-    async def _handle_customer_response(self, call_sid: str, call_state: Dict, request_data: Dict) -> str:
-        """Process customer response and generate AI reply"""
-        try:
-            # Extract customer speech
-            customer_speech = request_data.get('SpeechResult', '').strip()
-            speech_confidence = float(request_data.get('Confidence', 0.0))
-            
-            # Handle low confidence or empty speech
-            if not customer_speech or speech_confidence < 0.4:
-                retry_message = "I'm sorry, I didn't catch that clearly. Could you please repeat what you said?"
-                return self.twilio_handler.generate_twiml_response(
-                    retry_message, 
-                    gather_input=True,
-                    timeout=8
-                )
-            
-            # Log customer response
-            call_state['conversation_history'].append({
-                'turn': call_state['current_turn'],
-                'type': 'customer',
-                'message': customer_speech,
-                'confidence': speech_confidence,
-                'timestamp': datetime.utcnow()
-            })
-            
-            # Analyze sentiment
-            sentiment_result = await self.speech_processor.analyze_sentiment(customer_speech)
-            
-            # Check for immediate call ending conditions
-            if self.conversation_engine.should_end_call(
-                customer_speech, 
-                call_state['current_turn'], 
-                call_state['call_type']
-            ):
-                return await self._handle_call_ending(call_sid, call_state, 'customer_request')
-            
-            # Generate AI response
-            ai_response = self.conversation_engine.generate_adaptive_response(
-                customer_speech,
-                call_state['prospect_context'],
-                call_state['conversation_history']
-            )
-            
-            # Log AI response
-            call_state['conversation_history'].append({
-                'turn': call_state['current_turn'],
-                'type': 'agent',
-                'message': ai_response,
-                'sentiment': sentiment_result,
-                'timestamp': datetime.utcnow()
-            })
-            
-            call_state['current_turn'] += 1
-            
-            # Check if we should continue or end
-            if call_state['current_turn'] >= self.max_conversation_turns:
-                return await self._handle_call_ending(call_sid, call_state, 'max_turns')
-            
-            # Check for natural conversation ending
-            if self._should_end_naturally(customer_speech, call_state):
-                return await self._handle_call_ending(call_sid, call_state, 'natural_end')
-            
-            # Generate TwiML response
-            return self.twilio_handler.generate_twiml_response(
-                ai_response, 
-                gather_input=True,
-                timeout=10
-            )
-            
-        except Exception as e:
-            logging.error(f"Error processing customer response: {str(e)}")
-            return self.twilio_handler.generate_twiml_response(
-                "I apologize for the technical difficulty. Thank you for your time. Goodbye.", 
-                gather_input=False
-            )
+    
     
     async def _handle_call_ending(self, call_sid: str, call_state: Dict, reason: str) -> str:
         """Handle call ending and cleanup"""
@@ -519,51 +543,78 @@ class UnifiedVoiceBot:
         customer_lower = customer_speech.lower()
         return any(signal in customer_lower for signal in buying_signals)
 
+    # Update handle_call_status_update to support both call types
     async def handle_call_status_update(self, call_sid: str, status: str, request_data: Dict):
-        """Handle call status updates from Twilio"""
+        """Handle call status updates from Twilio - supports both inbound and outbound"""
         try:
-            if call_sid in self.active_calls:
-                call_state = self.active_calls[call_sid]
-                
+            call_state = self.get_call_state(call_sid)
+            
+            if call_state:
                 if status in ['completed', 'failed', 'busy', 'no-answer']:
                     # Update call outcome if not already set
                     if not call_state.get('call_outcome'):
                         call_state['call_outcome'] = status
                     
                     # If call ended without conversation, save minimal data
-                    if status in ['failed', 'busy', 'no-answer'] and call_state['current_turn'] == 0:
+                    if status in ['failed', 'busy', 'no-answer'] and call_state.get('current_turn', 0) == 0:
                         await self._save_incomplete_call(call_sid, call_state, status)
-                        del self.active_calls[call_sid]
+                    
+                    # Schedule cleanup with delay to handle late webhooks
+                    self.schedule_call_cleanup(call_sid, delay_seconds=60)
                 
-                logging.info(f"Call {call_sid} status updated to {status}")
+                logging.info(f"Call {call_sid} status updated to {status} (type: {call_state.get('call_type', 'unknown')})")
+            else:
+                logging.info(f"Status update for unknown call: {call_sid}")
             
         except Exception as e:
             logging.error(f"Error handling call status update: {str(e)}")
     
+    # Add method to get all active calls (both inbound and outbound)
+    def get_all_active_calls(self) -> Dict:
+        """Get all active calls regardless of type"""
+        all_calls = {}
+        all_calls.update(self.active_calls)
+        all_calls.update(self.inbound_active_calls)
+        return all_calls
+    
+    # Add method to get active call count
+    def get_active_call_count(self) -> Dict:
+        """Get count of active calls by type"""
+        return {
+            'outbound': len(self.active_calls),
+            'inbound': len(self.inbound_active_calls),
+            'total': len(self.active_calls) + len(self.inbound_active_calls)
+        }
+    
     async def _save_incomplete_call(self, call_sid: str, call_state: Dict, outcome: str):
-        """Save data for incomplete calls (no answer, busy, etc.)"""
+        """Save data for incomplete calls (no answer, busy, etc.) - supports both call types"""
         try:
-            prospect = call_state['prospect_context']['prospect']
+            prospect_id = call_state.get('prospect_id')
+            if not prospect_id:
+                logging.warning(f"No prospect_id for incomplete call {call_sid}")
+                return
             
             call_record = CallHistory(
-                prospect_id=prospect.id,
+                prospect_id=prospect_id,
                 call_sid=call_sid,
-                call_type=call_state['call_type'],
+                call_type=call_state.get('call_type', 'outbound'),
                 call_duration=0,
                 call_outcome=outcome,
                 conversation_log=[],
                 conversation_summary=f"Call {outcome}",
                 qualification_score=0,
                 next_action='retry_later',
-                called_at=call_state['start_time'],
+                called_at=call_state.get('start_time', datetime.utcnow()),
                 completed_at=datetime.utcnow()
             )
             
             session = self.db_manager.get_session()
-            session.add(call_record)
-            session.commit()
-            
-            logging.info(f"Incomplete call saved: {call_sid} - {outcome}")
+            try:
+                session.add(call_record)
+                session.commit()
+                logging.info(f"Incomplete call saved: {call_sid} - {outcome}")
+            finally:
+                session.close()
             
         except Exception as e:
             logging.error(f"Error saving incomplete call: {str(e)}")

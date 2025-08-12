@@ -66,6 +66,30 @@ class Config:
     # Callback Settings
     ENABLE_CALLBACKS = os.getenv('ENABLE_CALLBACKS', 'true').lower() == 'true'
     CALLBACK_CONFIRMATION_SMS = os.getenv('CALLBACK_CONFIRMATION_SMS', 'false').lower() == 'true'
+
+    # Performance optimizations
+    ENABLE_RESPONSE_STREAMING = True
+    ENABLE_TTS_CACHE = True
+    MAX_TTS_CACHE_SIZE = 100  # MB
+    ENABLE_PARALLEL_PROCESSING = True
+
+    # Reduced timeouts for faster response
+    SPEECH_RECOGNITION_TIMEOUT = 2000  # ms (reduced from 3000)
+    MAX_AI_RESPONSE_TIME = 1500  # ms
+
+    # Pre-warming settings
+    PREWARM_COMMON_RESPONSES = True
+    PREWARM_ON_STARTUP = True
+
+    # Playbook settings
+    PLAYBOOK_PDF_PATH = os.getenv('PLAYBOOK_PDF_PATH', 'playbook/sales_playbook.pdf')
+    PLAYBOOK_CACHE_DIR = os.getenv('PLAYBOOK_CACHE_DIR', 'playbook/cache')
+    PLAYBOOK_INDEX_UPDATE_HOURS = 24  # Re-index every 24 hours
+    USE_PLAYBOOK_FIRST = True  # Prioritize playbook over AI
+    PLAYBOOK_CONFIDENCE_THRESHOLD = 0.7
+    PLAYBOOK_CONFIDENCE_THRESHOLD = 0.7
+    SCENARIO_MATCH_THRESHOLD = 0.6
+    MAX_RESPONSE_TIME_MS = 3000  # Keep under Twilio's 15s limit
     
     @staticmethod
     def validate_config():

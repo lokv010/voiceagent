@@ -74,7 +74,7 @@ def create_inbound_agent_service(config, db_manager, existing_services=None):
     Returns:
         InboundAgentService: Configured inbound agent service instance
     """
-    return InboundAgentService(
+    return InboundCallHandler(
         config=config,
         db_manager=db_manager,
         voice_service=existing_services.get('voice') if existing_services else None,

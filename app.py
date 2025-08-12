@@ -5,6 +5,7 @@ This service provides core voice bot functionality and handles Twilio webhooks.
 The Next.js application handles the main API layer and user interface.
 """
 
+import time
 from flask import Flask, request, jsonify
 # from flask_cors import CORS
 import os
@@ -12,6 +13,8 @@ import logging
 import asyncio
 from datetime import datetime, timedelta
 import json
+
+import websockets
 
 # Import configuration
 from config import config,get_config
@@ -35,7 +38,8 @@ from services.inbound_lead_scorer import InboundLeadScorer
 from services.inbound_agent_service import InboundCallHandler
 from services.callback_scheduler import CallbackScheduler
 from utils import log_api_call, timing_decorator
-
+from services.media_stream_handler import MediaStreamHandler
+from services.webrtc_handler import WebRTCAudioHandler
 from sqlalchemy import desc, text
 
 from utils.helpers import is_business_hours
@@ -72,16 +76,34 @@ try:
     db_manager = DatabaseManager(app_config.SQLALCHEMY_DATABASE_URI)
     voice_bot = UnifiedVoiceBot(app_config, db_manager)
     campaign_manager = UnifiedCampaignManager(voice_bot, db_manager)
+    
+    # Simple, fast, intelligent inbound handler
     inbound_handler = InboundCallHandler(voice_bot, db_manager, app_config)
+    
     callback_scheduler = CallbackScheduler(voice_bot, db_manager, app_config)
-    inbound_conversation = InboundConversationEngine(voice_bot.conversation_engine)
-    inbound_scorer = InboundLeadScorer()
+    media_handler = MediaStreamHandler(voice_bot, voice_bot.speech_processor)
+    webrtc_handler = WebRTCAudioHandler(voice_bot)
+    
     add_inbound_call_support(db_manager)
-
+    
     logger.info("Voice agent services initialized successfully")
 except Exception as e:
     logger.error(f"Failed to initialize services: {e}")
     raise
+
+
+    
+    # WebSocket server for Media Streams
+    async def start_websocket_server():
+        server = await websockets.serve(
+            media_handler.handle_media_stream,
+            "0.0.0.0",
+            8765
+        )
+        await server.wait_closed()
+
+    logger.info("Voice agent services initialized successfully")
+
 
 # ==================== HEALTH & STATUS ENDPOINTS ====================
 
@@ -149,6 +171,17 @@ def get_system_stats():
     except Exception as e:
         logger.error(f"Get system stats error: {str(e)}")
         return jsonify({'error': str(e)}), 500
+    
+#================Web rtc Handler=================
+@app.route('/api/webrtc/answer', methods=['POST'])
+async def handle_webrtc_answer():
+    """Handle WebRTC answer from browser"""
+    data = request.get_json()
+    call_id = data.get('call_id')
+    answer = data.get('answer')
+    
+    result = await webrtc_handler.handle_answer(call_id, answer)
+    return jsonify(result)
 
 # ==================== CORE VOICE BOT SERVICES ====================
 
@@ -245,69 +278,177 @@ def upload_cold_leads():
 
 
 
-# Initialize inbound call handler after existing service initialization
-inbound_handler = InboundCallHandler(voice_bot, db_manager, app_config)
+
 
 # ==================== INBOUND CALL WEBHOOKS ====================
 
 @app.route('/inbound-webhook', methods=['POST'])
 @timing_decorator
 def inbound_voice_webhook():
-    """
-    Handle incoming calls - Direct from Twilio
-    This is the main entry point for inbound calls
-    """
+    """Handle incoming calls - Direct from Twilio"""
     try:
         call_sid = request.form.get('CallSid')
         from_number = request.form.get('From')
-        to_number = request.form.get('To')
         call_status = request.form.get('CallStatus')
         
-        logger.info(f"Inbound call webhook: {call_sid} - {call_status} from {from_number} to {to_number}")
+        logger.info(f"Inbound call webhook: {call_sid} - {call_status} from {from_number}")
         
-        # Handle the inbound call
+        # Use the OpenAI-powered handler
         twiml_response = asyncio.run(
             inbound_handler.handle_inbound_call(call_sid, request.form.to_dict())
         )
-        
         return twiml_response, 200, {'Content-Type': 'text/xml'}
         
     except Exception as e:
         logger.error(f"Inbound voice webhook error: {str(e)}")
-        # Return fallback TwiML
-        fallback_twiml = '''<?xml version="1.0" encoding="UTF-8"?>
+        # Better fallback that doesn't use complex handlers
+        return '''<?xml version="1.0" encoding="UTF-8"?>
         <Response>
-            <Say voice="Polly.Joanna">Thank you for calling. We're experiencing technical difficulties. Please try again later.</Say>
-            <Hangup/>
-        </Response>'''
-        return fallback_twiml, 200, {'Content-Type': 'text/xml'}
+            <Gather input="speech" timeout="10" action="/inbound-webhook/process" method="POST">
+                <Say voice="Polly.Joanna">Thank you for calling. How can I help you today?</Say>
+            </Gather>
+        </Response>''', 200, {'Content-Type': 'text/xml'}
 
 @app.route('/inbound-webhook/process', methods=['POST'])
 @timing_decorator
 def process_inbound_speech():
-    """Process speech input from inbound caller"""
+    """Process inbound speech with OpenAI intelligence"""
     try:
         call_sid = request.form.get('CallSid')
-        speech_result = request.form.get('SpeechResult', '')
-        confidence = request.form.get('Confidence', '0.0')
         
-        logger.info(f"Inbound speech processing: {call_sid} - '{speech_result}' (confidence: {confidence})")
-        
-        # Process customer response
+        # Use OpenAI handler for fast, intelligent responses
         twiml_response = asyncio.run(
             inbound_handler.handle_inbound_response(call_sid, request.form.to_dict())
         )
-        
         return twiml_response, 200, {'Content-Type': 'text/xml'}
         
     except Exception as e:
-        logger.error(f"Inbound speech processing error: {str(e)}")
-        fallback_twiml = '''<?xml version="1.0" encoding="UTF-8"?>
+        logger.error(f"Speech processing error: {e}")
+        # Improved fallback with better context handling
+        return _generate_contextual_fallback(
+            request.form.get('SpeechResult', ''),
+            request.form.get('Confidence', '0.0')
+        ), 200, {'Content-Type': 'text/xml'}
+# ==================== FALLBACK HELPER FUNCTIONS ====================
+   
+
+def _generate_contextual_fallback(speech_result: str, confidence: str) -> str:
+    """Generate better contextual fallback responses"""
+    try:
+        confidence_float = float(confidence) if confidence else 0.0
+        speech_lower = speech_result.lower() if speech_result else ""
+        
+        logger.info(f"Generating fallback for: '{speech_result}' (confidence: {confidence})")
+        
+        # Handle low confidence
+        if confidence_float < 0.4 or not speech_result:
+            return '''<?xml version="1.0" encoding="UTF-8"?>
+            <Response>
+                <Gather input="speech" timeout="10" action="/inbound-webhook/process" method="POST">
+                    <Say voice="Polly.Joanna">I'm sorry, I didn't catch that clearly. Could you please repeat?</Say>
+                </Gather>
+            </Response>'''
+        
+        # Handle specific intents
+        if any(word in speech_lower for word in ['human', 'agent', 'person', 'transfer', 'speak to someone']):
+            agent_number = os.getenv('AGENT_TRANSFER_NUMBER', '+12267537919')
+            return f'''<?xml version="1.0" encoding="UTF-8"?>
+            <Response>
+                <Say voice="Polly.Joanna">I'll connect you with a specialist right away.</Say>
+                <Dial>{agent_number}</Dial>
+            </Response>'''
+        
+        # Handle not interested
+        if any(phrase in speech_lower for phrase in ['not interested', 'no thank', 'remove me', 'stop calling']):
+            return '''<?xml version="1.0" encoding="UTF-8"?>
+            <Response>
+                <Say voice="Polly.Joanna">I understand. Thank you for your time and have a great day!</Say>
+                <Hangup/>
+            </Response>'''
+        
+        # Solar-specific responses based on keywords
+        if any(word in speech_lower for word in ['price', 'cost', 'money', 'expensive', 'bill']):
+            response = "Great question about pricing! What's your average monthly electric bill?"
+        elif any(word in speech_lower for word in ['solar', 'panels', 'energy', 'electricity']):
+            response = "I'd love to help you with solar! Do you own your home?"
+        elif any(word in speech_lower for word in ['yes', 'interested', 'tell me more']):
+            response = "Wonderful! To give you the best information, do you own your home?"
+        elif any(word in speech_lower for word in ['save', 'saving', 'savings']):
+            response = "Solar can definitely help you save money! What's your monthly electric bill?"
+        else:
+            # Vary the response to avoid repetition
+            responses = [
+                "I'd be happy to help you explore solar options. Do you own your home?",
+                "Great that you called! Are you interested in learning about solar for your home?",
+                "I can help you with solar information. Do you currently own your home?",
+                "Let me help you with solar options. First, are you a homeowner?"
+            ]
+            import random
+            response = random.choice(responses)
+        
+        return f'''<?xml version="1.0" encoding="UTF-8"?>
         <Response>
-            <Say voice="Polly.Joanna">Thank you for calling. Have a great day!</Say>
-            <Hangup/>
+            <Gather input="speech" timeout="10" action="/inbound-webhook/process" method="POST">
+                <Say voice="Polly.Joanna">{response}</Say>
+            </Gather>
         </Response>'''
-        return fallback_twiml, 200, {'Content-Type': 'text/xml'}
+        
+    except Exception as e:
+        logger.error(f"Error generating contextual fallback: {e}")
+        return '''<?xml version="1.0" encoding="UTF-8"?>
+        <Response>
+            <Gather input="speech" timeout="10" action="/inbound-webhook/process" method="POST">
+                <Say voice="Polly.Joanna">How can I help you today?</Say>
+            </Gather>
+        </Response>'''
+def _generate_basic_response_fallback(speech_result):
+    """Generate contextual fallback response"""
+    try:
+        speech_lower = speech_result.lower() if speech_result else ""
+        
+        if any(word in speech_lower for word in ['human', 'agent', 'person']):
+            message = "Let me connect you with someone who can help you."
+            return f'''<?xml version="1.0" encoding="UTF-8"?>
+            <Response>
+                <Say voice="Polly.Joanna">{message}</Say>
+                <Dial>{os.getenv('AGENT_TRANSFER_NUMBER', '+12267537919')}</Dial>
+            </Response>'''
+        
+        elif any(word in speech_lower for word in ['price', 'cost', 'money']):
+            message = "I'd be happy to discuss solar pricing. What's your monthly electric bill?"
+            
+        elif any(word in speech_lower for word in ['solar', 'panels', 'energy']):
+            message = "Great question about solar! Do you own your home?"
+            
+        elif any(word in speech_lower for word in ['yes', 'interested']):
+            message = "Wonderful! To give you the best information, do you own your home?"
+            
+        elif any(word in speech_lower for word in ['no', 'not interested']):
+            message = "I understand. Thank you for your time and have a great day!"
+            return f'''<?xml version="1.0" encoding="UTF-8"?>
+            <Response>
+                <Say voice="Polly.Joanna">{message}</Say>
+                <Hangup/>
+            </Response>'''
+            
+        else:
+            message = "How can I help you explore solar for your home today?"
+        
+        return f'''<?xml version="1.0" encoding="UTF-8"?>
+        <Response>
+            <Gather input="speech" timeout="10" action="/inbound-webhook/process" method="POST">
+                <Say voice="Polly.Joanna">{message}</Say>
+            </Gather>
+        </Response>'''
+        
+    except Exception as e:
+        logging.error(f"Error generating fallback: {e}")
+        return '''<?xml version="1.0" encoding="UTF-8"?>
+        <Response>
+            <Say voice="Polly.Joanna">How can I help you today?</Say>
+            <Gather input="speech" timeout="10" action="/inbound-webhook/process" method="POST"/>
+        </Response>'''
+
 
 @app.route('/inbound-webhook/after-hours', methods=['POST'])
 @timing_decorator
@@ -432,24 +573,77 @@ def inbound_call_status():
         
         logger.info(f"Inbound call status update: {call_sid} - {call_status} (duration: {duration})")
         
-        # Handle status update using existing method
-        asyncio.run(
-            voice_bot.handle_call_status_update(call_sid, call_status, request.form.to_dict())
-        )
+        if call_status in ['completed', 'failed', 'busy', 'no-answer']:
+            # Don't immediately remove from active_calls
+            # Schedule cleanup after delay to handle late speech webhooks
+            if call_sid in voice_bot.active_calls:
+                call_state = voice_bot.active_calls[call_sid]
+                call_state['call_outcome'] = call_status
+                call_state['end_time'] = datetime.utcnow()
+                call_state['duration'] = duration
+                
+                # Schedule delayed cleanup (30 seconds)
+                def delayed_cleanup():
+                    time.sleep(60)
+                    if call_sid in voice_bot.active_calls:
+                        logging.info(f"Delayed cleanup of call: {call_sid}")
+                        # Save call results before cleanup
+                        try:
+                            asyncio.run(voice_bot.handle_call_status_update(call_sid, call_status, request.form.to_dict()))
+                        except Exception as e:
+                            logging.error(f"Error in delayed cleanup: {e}")
+                        finally:
+                            voice_bot.active_calls.pop(call_sid, None)
+                
+                # Run cleanup in background thread
+                import threading
+                cleanup_thread = threading.Thread(target=delayed_cleanup, daemon=True)
+                cleanup_thread.start()
+            else:
+                # Call already cleaned up, just log
+                logging.info(f"Status update for already cleaned call: {call_sid}")
         
         return jsonify({'status': 'received', 'call_sid': call_sid})
         
     except Exception as e:
-        logger.error(f"Inbound status webhook error: {str(e)}")
+        logging.error(f"Error handling call status: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/inbound/call-states', methods=['GET'])
+def get_call_states():
+    """Monitor current call states"""
+    try:
+        active_count = len(voice_bot.active_calls)
+        call_details = []
+        
+        for call_sid, call_state in voice_bot.active_calls.items():
+            call_details.append({
+                'call_sid': call_sid,
+                'phone_number': call_state.get('phone_number', 'unknown'),
+                'start_time': call_state.get('start_time', datetime.utcnow()).isoformat(),
+                'current_turn': call_state.get('current_turn', 0),
+                'conversation_stage': call_state.get('conversation_stage', 'unknown'),
+                'call_outcome': call_state.get('call_outcome'),
+                'duration_seconds': int((datetime.utcnow() - call_state.get('start_time', datetime.utcnow())).total_seconds()) if call_state.get('start_time') else 0
+            })
+        
+        return jsonify({
+            'active_calls_count': active_count,
+            'calls': call_details,
+            'timestamp': datetime.utcnow().isoformat()
+        })
+        
+    except Exception as e:
+        logging.error(f"Error getting call states: {e}")
+        return jsonify({'error': str(e)}), 500
+
 
 # ==================== INBOUND CALL MANAGEMENT APIs ====================
 
 @app.route('/api/inbound/stats', methods=['GET'])
 def get_inbound_stats():
-    """Get inbound call statistics"""
+    """Get simplified inbound call statistics"""
     try:
-        # Get date range
         days_back = int(request.args.get('days_back', 7))
         start_date = datetime.utcnow() - timedelta(days=days_back)
         
@@ -461,40 +655,18 @@ def get_inbound_stats():
             CallHistory.called_at >= start_date
         ).all()
         
-        # Calculate stats
         total_inbound = len(inbound_calls)
         completed_calls = len([c for c in inbound_calls if c.call_outcome == 'completed'])
-        voicemails = len([c for c in inbound_calls if c.call_outcome == 'voicemail'])
-        transfers = len([c for c in inbound_calls if 'transfer' in (c.notes or '')])
-        
-        avg_duration = sum(c.call_duration or 0 for c in inbound_calls) / total_inbound if total_inbound > 0 else 0
         avg_score = sum(c.qualification_score or 0 for c in inbound_calls) / total_inbound if total_inbound > 0 else 0
-        
         qualified_leads = len([c for c in inbound_calls if (c.qualification_score or 0) >= 70])
-        
-        # Business hours vs after hours breakdown
-        business_calls = 0
-        after_hours_calls = 0
-        
-        for call in inbound_calls:
-            if call.called_at:
-                if is_business_hours(call.called_at):
-                    business_calls += 1
-                else:
-                    after_hours_calls += 1
         
         stats = {
             'total_inbound_calls': total_inbound,
             'completed_calls': completed_calls,
-            'voicemails': voicemails,
-            'transfers_requested': transfers,
             'qualified_leads': qualified_leads,
-            'avg_call_duration': round(avg_duration, 1),
             'avg_qualification_score': round(avg_score, 1),
-            'business_hours_calls': business_calls,
-            'after_hours_calls': after_hours_calls,
             'conversion_rate': round((qualified_leads / completed_calls * 100) if completed_calls > 0 else 0, 1),
-            'completion_rate': round((completed_calls / total_inbound * 100) if total_inbound > 0 else 0, 1)
+            'handler_type': 'openai_intelligent'
         }
         
         session.close()
@@ -546,29 +718,28 @@ def get_recent_inbound_calls():
 
 @app.route('/api/inbound/configure', methods=['POST'])
 def configure_inbound_settings():
-    """Configure inbound call settings"""
+    """Configure OpenAI inbound settings"""
     try:
         settings = request.get_json()
         
-        # Update inbound handler settings
-        if 'business_hours' in settings:
-            inbound_handler.business_hours.update(settings['business_hours'])
-        
+        # Update handler settings
         if 'agent_transfer_number' in settings:
             inbound_handler.agent_transfer_number = settings['agent_transfer_number']
         
-        if 'max_queue_time' in settings:
-            inbound_handler.max_queue_time = int(settings['max_queue_time'])
+        if 'business_hours' in settings:
+            inbound_handler.business_hours.update(settings['business_hours'])
         
-        # Save settings to database or config file
-        # Implementation depends on your preference for persistence
+        # Update response cache if provided
+        if 'response_cache' in settings:
+            inbound_handler.response_cache.update(settings['response_cache'])
         
         return jsonify({
             'status': 'updated',
+            'handler_type': 'openai_intelligent',
             'settings': {
-                'business_hours': inbound_handler.business_hours,
                 'agent_transfer_number': inbound_handler.agent_transfer_number,
-                'max_queue_time': inbound_handler.max_queue_time
+                'business_hours': inbound_handler.business_hours,
+                'cache_size': len(inbound_handler.response_cache)
             }
         })
         
@@ -1386,6 +1557,12 @@ def process_speech():
             <Hangup/>
         </Response>'''
         return fallback_twiml, 200, {'Content-Type': 'text/xml'}
+    
+
+
+
+
+
 
 @app.route('/voice-webhook/status', methods=['POST'])
 def call_status():
@@ -1407,6 +1584,7 @@ def call_status():
     except Exception as e:
         logger.error(f"Status webhook error: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
 
 # ==================== ERROR HANDLERS ====================
 
@@ -1468,3 +1646,95 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"Failed to start service: {e}")
         raise
+# ==================== ENHANCED ANALYTICS ENDPOINTS ====================
+
+@app.route('/api/inbound/intelligence-stats', methods=['GET'])
+def get_intelligence_stats():
+    """Get statistics on intelligence system performance"""
+    try:
+        days_back = int(request.args.get('days_back', 7))
+        start_date = datetime.utcnow() - timedelta(days=days_back)
+        
+        session = db_manager.get_session()
+        
+        # Get inbound calls with intelligence metadata
+        inbound_calls = session.query(CallHistory).filter(
+            CallHistory.call_type == 'inbound',
+            CallHistory.called_at >= start_date
+        ).all()
+        
+        stats = {
+            'total_calls': len(inbound_calls),
+            'intelligence_enabled_calls': 0,
+            'playbook_responses': 0,
+            'ai_responses': 0,
+            'fallback_responses': 0,
+            'avg_response_confidence': 0,
+            'scenario_breakdown': {},
+            'strategy_effectiveness': {},
+            'system_performance': {
+                'enhanced_handler_success_rate': 0,
+                'playbook_engine_availability': hasattr(inbound_handler, 'playbook_engine') and inbound_handler.playbook_engine is not None,
+                'intent_analyzer_availability': hasattr(inbound_handler, 'intent_analyzer') and inbound_handler.intent_analyzer is not None
+            }
+        }
+        
+        confidence_scores = []
+        intelligence_enabled = 0
+        playbook_count = 0
+        ai_count = 0
+        fallback_count = 0
+        
+        for call in inbound_calls:
+            try:
+                if call.conversation_log:
+                    # Parse conversation log
+                    if isinstance(call.conversation_log, str):
+                        conversation_data = json.loads(call.conversation_log)
+                    else:
+                        conversation_data = call.conversation_log
+                    
+                    # Check for intelligence indicators
+                    has_intelligence = False
+                    for interaction in conversation_data:
+                        if isinstance(interaction, dict):
+                            strategy = interaction.get('strategy_used', '')
+                            if 'intelligent' in strategy or 'playbook' in strategy:
+                                has_intelligence = True
+                                
+                            if 'playbook' in strategy:
+                                playbook_count += 1
+                            elif 'ai' in strategy:
+                                ai_count += 1
+                            elif 'fallback' in strategy:
+                                fallback_count += 1
+                    
+                    if has_intelligence:
+                        intelligence_enabled += 1
+                    
+                    # Track confidence scores
+                    if call.qualification_score:
+                        confidence_scores.append(call.qualification_score)
+                        
+            except Exception as e:
+                logger.debug(f"Error parsing call log: {e}")
+        
+        # Update stats
+        stats['intelligence_enabled_calls'] = intelligence_enabled
+        stats['playbook_responses'] = playbook_count
+        stats['ai_responses'] = ai_count
+        stats['fallback_responses'] = fallback_count
+        
+        if confidence_scores:
+            stats['avg_response_confidence'] = sum(confidence_scores) / len(confidence_scores)
+        
+        stats['system_performance']['enhanced_handler_success_rate'] = (
+            intelligence_enabled / len(inbound_calls) * 100 if inbound_calls else 0
+        )
+        
+        session.close()
+        return jsonify(stats)
+        
+    except Exception as e:
+        logger.error(f"Get intelligence stats error: {str(e)}")
+        return jsonify({'error': str(e)}), 500

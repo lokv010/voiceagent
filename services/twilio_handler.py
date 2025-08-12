@@ -76,25 +76,27 @@ class TwilioVoiceHandler:
             }
     
     def generate_twiml_response(self, message: str, gather_input: bool = True, 
-                               timeout: int = 10, action_url: str = None) -> str:
+                               timeout: int = 10, action_url: str = None,enable_partial: bool = True) -> str:
         """Generate TwiML response for voice interaction"""
         try:
             response = VoiceResponse()
             
             if gather_input:
                 # Configure speech gathering
-                action_url = action_url or f"{self.webhook_url}/voice-webhook/process"
+                action_url = action_url or f"{self.webhook_url}/inbound-webhook/process"
                 
                 gather = Gather(
                     input='speech',
                     action=action_url,
                     method='POST',
                     timeout=timeout,
-                    speech_timeout=3,  # Silence after speech
+                    speech_timeout=2,  # Silence after speech
                     language='en-US',
                     enhanced=True,  # Use enhanced speech recognition
-                    speech_model='phone_call'  # Optimized for phone calls
-                )
+                    speech_model='phone_call',  # Optimized for phone calls
+                    partial_result_callback=f"{self.webhook_url}/inbound-webhook/process" if enable_partial else None,
+                    partial_result_callback_method='POST' if enable_partial else None
+                    )
                 
                 # Say the message and wait for response
                 gather.say(

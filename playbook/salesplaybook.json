@@ -1,0 +1,399 @@
+{
+  "playbook_version": "2.0",
+  "company": "ProSolar Solutions",
+  "conversation_flows": {
+    "inbound_greeting": {
+      "first_time_caller": {
+        "response": "Thank you for calling ProSolar Solutions! This is Sarah. I understand you're interested in solar - that's fantastic! What's prompting you to explore solar energy today?",
+        "next_questions": ["motivation", "timeline"],
+        "avoid_questions": []
+      },
+      "returning_caller": {
+        "response": "Great to hear from you again! How can I help you take the next step with solar today?",
+        "next_questions": ["progress_check", "new_questions"],
+        "avoid_questions": ["homeowner_status"]
+      },
+      "form_follow_up": {
+        "response": "Hi! I see you submitted a form about solar - thank you for your interest! I have some of your basic information already. What specific questions can I answer to help you move forward?",
+        "next_questions": ["form_clarification", "immediate_needs"],
+        "avoid_questions": ["homeowner_status", "basic_info"]
+      }
+    },
+    "intent_responses": {
+      "pricing_inquiry": {
+        "immediate_response": "I'd be happy to discuss solar pricing! The investment really depends on your specific situation. What's your current monthly electric bill?",
+        "follow_up_questions": ["current_bill", "home_size", "energy_usage"],
+        "qualification_needed": ["homeowner_status", "roof_condition"],
+        "objection_prevention": "Most homeowners are surprised to learn they can start saving from day one with financing."
+      },
+      "savings_inquiry": {
+        "immediate_response": "Solar savings are exciting! Most of our customers save 50-90% on their electric bills. What's your average monthly electric bill right now?",
+        "follow_up_questions": ["current_bill", "peak_usage", "future_plans"],
+        "qualification_needed": ["homeowner_status", "roof_suitability"],
+        "value_add": "Plus, you'll be protected against rising electricity rates for the next 25+ years."
+      },
+      "general_inquiry": {
+        "immediate_response": "I'm excited to help you learn about solar! What's the main thing you'd like to understand about solar for your home?",
+        "follow_up_questions": ["specific_interest", "motivation", "concerns"],
+        "qualification_needed": ["homeowner_status"],
+        "conversation_starters": ["Have you seen solar panels in your neighborhood?", "What's got you thinking about solar now?"]
+      },
+      "complaint": {
+        "immediate_response": "I sincerely apologize for any frustration you've experienced. I want to make sure we resolve this properly. Can you tell me specifically what happened?",
+        "follow_up_questions": ["issue_details", "timeline_of_issue", "resolution_preference"],
+        "qualification_needed": [],
+        "escalation_triggers": ["legal", "attorney", "lawsuit", "unethical"]
+      },
+      "technical_question": {
+        "immediate_response": "Great technical question! I love that you're thinking about the details. What specifically would you like to know about solar technology?",
+        "follow_up_questions": ["specific_technical_area", "experience_level", "concerns"],
+        "qualification_needed": ["homeowner_status", "roof_details"],
+        "expert_areas": ["panels", "inverters", "monitoring", "installation", "maintenance"]
+      },
+      "competitor_comparison": {
+        "immediate_response": "It's smart that you're comparing options! What other companies are you considering, and what's most important to you in making this decision?",
+        "follow_up_questions": ["comparison_criteria", "other_quotes", "decision_timeline"],
+        "qualification_needed": ["homeowner_status", "serious_buyer"],
+        "competitive_advantages": ["warranty", "local_presence", "installation_quality", "customer_service"]
+      }
+    },
+    "qualification_flows": {
+      "homeowner_verification": {
+        "when_to_ask": ["pricing_inquiry", "savings_inquiry", "general_inquiry"],
+        "how_to_ask": {
+          "natural": "And you own your home, correct?",
+          "after_bill_discussion": "Perfect! And this is your home that you own?",
+          "verification": "Just to confirm - you own the home where you'd install solar?"
+        },
+        "responses": {
+          "yes": {
+            "response": "Perfect! That makes solar a great option for you.",
+            "next_questions": ["roof_condition", "current_bill", "motivation"]
+          },
+          "no": {
+            "response": "I understand. Unfortunately, solar typically requires homeownership for the best benefits. Are you planning to purchase a home in the near future?",
+            "next_questions": ["timeline_to_buy", "referral_opportunity"],
+            "qualification_end": true
+          },
+          "renting": {
+            "response": "I see. Solar installations typically require homeownership. However, you might ask your landlord about community solar programs in your area.",
+            "next_questions": ["landlord_interest", "community_solar"],
+            "qualification_end": true
+          }
+        }
+      },
+      "bill_qualification": {
+        "when_to_ask": ["after_homeowner_confirmed", "pricing_inquiry", "savings_inquiry"],
+        "how_to_ask": {
+          "natural": "What's your average monthly electric bill?",
+          "seasonal": "What's your electric bill like in summer versus winter?",
+          "high_usage": "Do you have any high-energy appliances like a pool or electric car?"
+        },
+        "responses": {
+          "under_50": {
+            "response": "That's a pretty low bill! You're already quite energy efficient. Solar could still provide savings and increase your home value. What's your main motivation for considering solar?",
+            "next_questions": ["motivation", "future_usage", "home_value"]
+          },
+          "50_to_100": {
+            "response": "That's right in the sweet spot for solar savings! Most customers with bills like yours save $30-70 per month with solar. What would you do with those extra savings?",
+            "next_questions": ["savings_motivation", "roof_condition", "timeline"]
+          },
+          "100_to_200": {
+            "response": "Wow, that's a significant bill! Solar could easily cut that in half or more. Have you noticed your bills going up over the years?",
+            "next_questions": ["rate_increases", "usage_patterns", "urgency"]
+          },
+          "over_200": {
+            "response": "That's a high electric bill! Solar could save you $100-150+ per month. With bills that high, solar often pays for itself in just 5-7 years. What's driving such high usage?",
+            "next_questions": ["high_usage_causes", "immediate_savings", "financing"]
+          }
+        }
+      },
+      "roof_assessment": {
+        "when_to_ask": ["after_bill_discussion", "technical_questions"],
+        "how_to_ask": {
+          "basic": "Tell me about your roof - which direction does it face?",
+          "detailed": "Is your roof in good condition, and do you have any trees shading it?",
+          "age": "How old is your roof, and when was it last replaced?"
+        },
+        "responses": {
+          "south_facing": {
+            "response": "Perfect! South-facing roofs are ideal for solar production. You'll get maximum energy generation.",
+            "next_questions": ["shading", "roof_age", "system_size"]
+          },
+          "east_west": {
+            "response": "East and west-facing roofs work great too! You'll get excellent morning and afternoon production.",
+            "next_questions": ["shading", "roof_condition", "split_system"]
+          },
+          "north_facing": {
+            "response": "North-facing can be challenging for solar. Do you have any south, east, or west-facing roof areas we could use instead?",
+            "next_questions": ["alternative_areas", "ground_mount", "roof_assessment"]
+          },
+          "shading_issues": {
+            "response": "Shading can impact solar production. Depending on the extent, we might be able to work around it with optimizers or micro-inverters. A site assessment would tell us for sure.",
+            "next_questions": ["shading_extent", "tree_removal", "alternative_locations"]
+          }
+        }
+      },
+      "timeline_assessment": {
+        "when_to_ask": ["after_qualification", "urgency_indicators"],
+        "how_to_ask": {
+          "general": "What's your ideal timeline for moving forward with solar?",
+          "urgent": "How quickly are you looking to get solar installed?",
+          "incentive_driven": "Are you aware of the current solar incentives and their timelines?"
+        },
+        "responses": {
+          "immediate": {
+            "response": "Excellent! We can typically get you installed within 4-8 weeks from contract signing. What's driving the urgency?",
+            "next_questions": ["urgency_reason", "financing_ready", "HOA_approval"]
+          },
+          "this_year": {
+            "response": "Great timing! Installing this year means you'll get the full 30% federal tax credit and start saving immediately.",
+            "next_questions": ["specific_month", "tax_benefit", "financing"]
+          },
+          "researching": {
+            "response": "Smart approach! Most customers take 2-4 weeks to research before deciding. What information would help you feel confident about moving forward?",
+            "next_questions": ["research_needs", "concerns", "comparison_shopping"]
+          },
+          "next_year": {
+            "response": "Planning ahead is wise! Keep in mind that solar incentives may change, and installation schedules fill up. Would it help to lock in current pricing and incentives?",
+            "next_questions": ["incentive_awareness", "price_protection", "planning_reasons"]
+          }
+        }
+      }
+    },
+    "objection_handling": {
+      "too_expensive": {
+        "acknowledge": "I completely understand - the investment is important to consider.",
+        "reframe": "What if I told you most customers start saving money from day one with financing, and the solar system pays for itself?",
+        "questions": [
+          "What amount were you comfortable investing monthly?",
+          "Would you rather eliminate your electric bill or keep paying it forever?",
+          "Have you considered that solar protects you from rising electricity rates?"
+        ],
+        "closes": [
+          "What if your solar payment was less than your current electric bill?",
+          "Would it help to see exactly what you'd save each month?"
+        ]
+      },
+      "need_to_think": {
+        "acknowledge": "Absolutely - this is an important decision that affects your family.",
+        "probe": "What specific information would help you feel confident about moving forward?",
+        "questions": [
+          "What concerns do you have that we haven't addressed?",
+          "What would need to change for this to feel like the right decision?",
+          "Who else is involved in making this decision?"
+        ],
+        "urgency": "I understand the need to think it over. Just keep in mind that incentives and our current pricing won't last forever."
+      },
+      "spouse_consultation": {
+        "acknowledge": "Of course! This decision affects the whole family.",
+        "facilitate": "What questions might they have that I can help you answer now?",
+        "questions": [
+          "What are their main concerns about solar?",
+          "Would it help if I spoke with both of you together?",
+          "What information can I provide to help with your discussion?"
+        ],
+        "follow_up": "How about I send you some information you can review together, and we can schedule a follow-up call?"
+      },
+      "timing_not_right": {
+        "acknowledge": "I understand timing is important.",
+        "probe": "What would need to change for the timing to be better?",
+        "questions": [
+          "Are you concerned about the installation process?",
+          "Is this a financial timing issue?",
+          "Are you waiting for something specific to happen?"
+        ],
+        "reframe": "Consider that every month you wait, you're losing money on your electric bill that solar could eliminate."
+      },
+      "not_sure_about_solar": {
+        "acknowledge": "It's natural to have questions about new technology.",
+        "educate": "Solar has been proven for decades - we have customers with 20+ year old systems still producing great energy.",
+        "questions": [
+          "What specific concerns do you have about solar?",
+          "Have you heard any negative things about solar?",
+          "What would make you feel confident about solar technology?"
+        ],
+        "social_proof": "We have over 1,000 happy customers in your area. Would you like to speak with some of them?"
+      }
+    },
+    "closing_techniques": {
+      "assumptive_close": {
+        "when_to_use": ["high_interest", "all_objections_handled", "buying_signals"],
+        "variations": [
+          "Based on everything we've discussed, solar is clearly a great fit. When would you like to schedule the site assessment?",
+          "It sounds like the Professional package is perfect for your needs. Shall we get the paperwork started?",
+          "You're going to love seeing your electric bill drop to almost nothing. What questions do you have about the next steps?"
+        ]
+      },
+      "alternative_close": {
+        "when_to_use": ["decision_hesitation", "multiple_options"],
+        "variations": [
+          "Would you prefer to start with the smaller system and add to it later, or go with the full system now?",
+          "Are you more interested in maximizing your savings or keeping the upfront investment lower?",
+          "Would you rather schedule the assessment for this week or next week?"
+        ]
+      },
+      "urgency_close": {
+        "when_to_use": ["incentive_expiration", "scheduling_pressure"],
+        "variations": [
+          "The federal tax credit is still at 30%, but that steps down soon. Would you like to lock in these savings?",
+          "We have a couple installation slots open next month. Should I reserve one for you?",
+          "Our current pricing is guaranteed for 30 days. Shall we move forward while it's protected?"
+        ]
+      },
+      "summary_close": {
+        "when_to_use": ["recap_needed", "complex_sale"],
+        "variations": [
+          "So you own your home, you're paying ${bill} monthly for electricity, and you want to save money while helping the environment. Solar checks all those boxes. What's the next step?",
+          "We've covered the savings, the financing, and the installation process. What other questions do you have before we move forward?",
+          "You've seen how solar will save you money and increase your home value. Are you ready to get started?"
+        ]
+      }
+    },
+    "product_information": {
+      "packages": {
+        "starter": {
+          "size": "3-5 kW",
+          "price_range": "$12,000-$18,000",
+          "monthly_production": "400-650 kWh",
+          "ideal_for": "Small homes, low usage, budget-conscious",
+          "talking_points": [
+            "Perfect starter system for smaller homes",
+            "Still provides significant savings",
+            "Can be expanded later if needed",
+            "Lower upfront investment"
+          ]
+        },
+        "professional": {
+          "size": "6-8 kW",
+          "price_range": "$20,000-$28,000",
+          "monthly_production": "750-1,100 kWh",
+          "ideal_for": "Average homes, most popular choice",
+          "talking_points": [
+            "Our most popular system size",
+            "Covers most family's energy needs",
+            "Best value for money",
+            "Optimal savings-to-investment ratio"
+          ]
+        },
+        "premium": {
+          "size": "9-12 kW",
+          "price_range": "$30,000-$40,000",
+          "monthly_production": "1,200-1,600 kWh",
+          "ideal_for": "Large homes, high usage, future expansion",
+          "talking_points": [
+            "Maximum savings potential",
+            "Covers high energy usage",
+            "Future-proofs for electric cars, pools",
+            "Highest return on investment"
+          ]
+        }
+      },
+      "financing_options": {
+        "cash": {
+          "benefits": ["Maximum savings", "No interest", "Immediate ROI"],
+          "talking_points": [
+            "Fastest payback period",
+            "Maximum lifetime savings",
+            "Full tax credit benefit",
+            "No monthly payments"
+          ]
+        },
+        "loan": {
+          "terms": "10-25 years",
+          "rates": "2.99%-6.99%",
+          "benefits": ["Lower monthly payment than electric bill", "Own the system", "Get tax credits"],
+          "talking_points": [
+            "Start saving from day one",
+            "Payment lower than current electric bill",
+            "You own the system and all savings",
+            "Build equity in your home"
+          ]
+        },
+        "lease": {
+          "terms": "20-25 years",
+          "benefits": ["No upfront cost", "Maintenance included", "Immediate savings"],
+          "talking_points": [
+            "Zero down payment",
+            "Maintenance and monitoring included",
+            "Immediate monthly savings",
+            "Simple and predictable"
+          ]
+        }
+      },
+      "technical_specs": {
+        "panels": {
+          "warranty": "25 years",
+          "efficiency": "20-22%",
+          "degradation": "0.25% per year",
+          "manufacturer": "Tier 1 manufacturers"
+        },
+        "inverters": {
+          "warranty": "10-25 years",
+          "efficiency": "96-98%",
+          "monitoring": "Real-time production tracking",
+          "types": "String inverters or microinverters"
+        },
+        "installation": {
+          "timeline": "1-3 days",
+          "permits": "We handle all permitting",
+          "inspection": "City and utility inspections included",
+          "warranty": "10 years on workmanship"
+        }
+      }
+    },
+    "conversation_state_management": {
+      "information_collected": {
+        "homeowner_status": false,
+        "monthly_bill": null,
+        "roof_condition": null,
+        "timeline": null,
+        "motivation": null,
+        "concerns_addressed": []
+      },
+      "questions_asked": [],
+      "objections_raised": [],
+      "interest_level": "unknown",
+      "qualification_score": 0
+    }
+  },
+  "response_optimization": {
+    "speed_improvements": {
+      "cached_responses": {
+        "common_questions": {
+          "how_much_does_solar_cost": "Solar investment varies by home size and energy needs. For most homes, it's between $15,000-$35,000, but with financing, your monthly payment is typically less than your current electric bill. What's your average monthly electric bill?",
+          "how_much_can_i_save": "Most customers save 50-90% on their electric bills! The exact savings depend on your current bill and roof space. What's your monthly electric bill now?",
+          "how_long_does_installation_take": "Installation typically takes 1-3 days, depending on system size. The whole process from contract to activation is usually 4-8 weeks. Are you looking to move quickly?",
+          "what_about_cloudy_days": "Solar panels work on cloudy days too, just at reduced efficiency. Plus, you're connected to the grid, so you always have power. Most systems produce more than you need annually."
+        }
+      },
+      "quick_qualification": {
+        "homeowner_check": "Just to confirm - this is for your own home that you own, correct?",
+        "bill_range": "Is your monthly electric bill typically over $75?",
+        "roof_suitability": "Does your roof face south, east, or west with minimal shading?"
+      }
+    },
+    "tone_matching": {
+      "excited_customer": {
+        "match_energy": true,
+        "use_enthusiasm": true,
+        "move_quickly": true
+      },
+      "analytical_customer": {
+        "provide_data": true,
+        "use_specifics": true,
+        "technical_details": true
+      },
+      "cautious_customer": {
+        "address_concerns": true,
+        "provide_reassurance": true,
+        "go_slowly": true
+      },
+      "price_conscious": {
+        "emphasize_savings": true,
+        "discuss_financing": true,
+        "roi_focus": true
+      }
+    }
+  }
+}
