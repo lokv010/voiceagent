@@ -113,8 +113,8 @@ def get_business_hours(timezone: str = 'UTC') -> Dict[str, str]:
         dict: Business hours configuration
     """
     return {
-        'start': '09:00',
-        'end': '17:00',
+        'start': '01:00',
+        'end': '23:00',
         'timezone': timezone,
         'weekdays_only': True
     }
@@ -134,11 +134,11 @@ def is_business_hours(dt: datetime = None, timezone: str = 'UTC') -> bool:
         dt = datetime.utcnow()
     
     # Simple business hours check (9 AM - 5 PM, weekdays only)
-    if dt.weekday() >= 5:  # Weekend
+    if dt.weekday() >= 7:  # Weekend
         return False
     
     hour = dt.hour
-    return 9 <= hour < 17
+    return 1 <= hour < 23
 
 # Text processing
 def sanitize_text(text: str, max_length: int = 1000) -> str:
