@@ -112,6 +112,27 @@ class InboundCallHandler:
                 return immediate_response
             
             logger.info("Generating OpenAI response")
+
+            # NEW: Try orchestrator first if available
+            if hasattr(self, 'orchestrator_enabled') and self.orchestrator_enabled:
+                orchestrated_response = await self._try_orchestrator_response(customer_speech, call_state)
+                if orchestrated_response:
+                    # Log orchestrator success
+                    call_state['conversation_history'].append({
+                        'turn': call_state['current_turn'],
+                        'type': 'agent',
+                        'message': 'Generated via orchestrator',
+                        'timestamp': datetime.utcnow(),
+                        'strategy': 'orchestrator_enhanced'
+                    })
+                    call_state['current_turn'] += 1
+                    logger.info("Generating orchestrator response successful")
+                    return orchestrated_response
+
+            # EXISTING: Generate intelligent response using OpenAI (unchanged)
+            logger.info("Using OpenAI response generation")
+            
+            response = await self._generate_openai_response(customer_speech, call_state)
             try:
                 response = await self._generate_openai_response(customer_speech, call_state)
                 logger.info(f"OpenAI generated response: '{response}'")
@@ -562,3 +583,56 @@ Respond naturally and helpfully."""
         except Exception as e:
             logging.error(f"Error saving call results: {e}")
 
+    #conversation engine supporting functions
+    def set_orchestrator(self, orchestrator, classification_engine):
+        """Connect orchestrator system for enhanced conversation flow"""
+        self.orchestrator = orchestrator
+        self.classification_engine = classification_engine
+        self.orchestrator_enabled = True
+        logging.info("Orchestrator connected to inbound handler")
+
+    async def _try_orchestrator_response(self, customer_speech: str, call_state: Dict) -> Optional[str]:
+        """Try orchestrator-enhanced response generation"""
+        try:
+            session_id = call_state.get('session_id', f"session_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}")
+            
+            # Initialize orchestrator session if needed
+            if session_id not in self.orchestrator.state_manager.active_sessions:
+                customer_context = self._create_customer_context(call_state)
+                self.orchestrator.state_manager.initialize_conversation_flow('inbound_call', customer_context)
+            
+            # Process input through orchestrator
+            result = self.orchestrator.process_customer_input(session_id, customer_speech)
+            
+            if result.get('success') and result.get('execution_result', {}).get('customer_response'):
+                response_text = result['execution_result']['customer_response']
+                
+                # Update call state with orchestrator insights
+                call_state['orchestrator_insights'] = {
+                    'classification': result.get('classification'),
+                    'confidence': result.get('classification', {}).get('confidence_score', 0),
+                    'recommended_flow': result.get('classification', {}).get('primary_flow')
+                }
+                
+                return self.voice_bot.twilio_handler.generate_twiml_response(
+                    response_text, gather_input=True, timeout=12
+                )
+                
+        except Exception as e:
+            logging.warning(f"Orchestrator response failed: {e}")
+            return None
+
+    def _create_customer_context(self, call_state: Dict):
+        """Convert call_state to CustomerContext for orchestrator"""
+        from flow_models import CustomerContext
+        
+        prospect = call_state['prospect_context']['prospect']
+        return CustomerContext(
+            customer_id=prospect.phone_number,
+            industry=getattr(prospect, 'industry', None),
+            company_size=getattr(prospect, 'company_size', None),
+            technical_background=getattr(prospect, 'technical_background', None),
+            previous_interactions=call_state['prospect_context'].get('call_history', []),
+            pain_points=call_state.get('discovered_pain_points', []),
+            goals=call_state.get('customer_goals', [])
+        )

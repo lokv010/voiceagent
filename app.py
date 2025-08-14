@@ -83,7 +83,27 @@ try:
     callback_scheduler = CallbackScheduler(voice_bot, db_manager, app_config)
     media_handler = MediaStreamHandler(voice_bot, voice_bot.speech_processor)
     webrtc_handler = WebRTCAudioHandler(voice_bot)
+
+    #conversion_engine
+    from services.conv_engine.flow_orch import FlowStateManager, FlowTransitionController, ConversationOrchestrator
+    from services.conv_engine.flow_classfier import FlowClassificationEngine
+    from services.conv_engine.pitch_flow import PitchAdaptationEngine
+    from services.conv_engine.flow_models import FlowType
+
+
+    flow_state_manager = FlowStateManager()
+    transition_controller = FlowTransitionController(flow_state_manager)
+    classification_engine = FlowClassificationEngine()
+    orchestrator = ConversationOrchestrator(flow_state_manager, transition_controller)
+
+    pitch_engine = PitchAdaptationEngine()
+    orchestrator.register_flow_engine([FlowType.PITCH], pitch_engine)
+    orchestrator.set_classification_engine(classification_engine)
+    # Connect to existing handler
+    inbound_handler.set_orchestrator(orchestrator, classification_engine)
     
+    logger.info("Orchestrator system initialized successfully")
+
     add_inbound_call_support(db_manager)
     
     logger.info("Voice agent services initialized successfully")
