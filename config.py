@@ -90,6 +90,11 @@ class Config:
     PLAYBOOK_CONFIDENCE_THRESHOLD = 0.7
     SCENARIO_MATCH_THRESHOLD = 0.6
     MAX_RESPONSE_TIME_MS = 3000  # Keep under Twilio's 15s limit
+
+    ENABLE_ORCHESTRATOR = os.getenv('ENABLE_ORCHESTRATOR', 'false').lower() == 'true'
+    ORCHESTRATOR_CONFIDENCE_THRESHOLD = float(os.getenv('ORCHESTRATOR_THRESHOLD', '0.7'))
+    ORCHESTRATOR_TIMEOUT = int(os.getenv('ORCHESTRATOR_TIMEOUT', '2000'))
+
     
     @staticmethod
     def validate_config():
