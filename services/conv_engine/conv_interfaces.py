@@ -229,6 +229,7 @@ class IntegrationBridge:
         base_result = {
             "execution_status": engine_result.get("status", "completed"),
             "customer_response": engine_result.get("customer_response", {}),
+            "message": engine_result.get("message", ""),
             "next_recommended_action": engine_result.get("next_action"),
             "performance_metrics": engine_result.get("metrics", {}),
             "context_updates": engine_result.get("context_updates", {})

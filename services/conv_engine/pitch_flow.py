@@ -1583,6 +1583,7 @@ class PitchDeliveryManager:
             "step_id": step["step_id"],
             "step_name": step["step_name"],
             "step_type": step.get("step_type", "conversation"),
+            "customer_response":natural_message,
             "message": natural_message,
             "expects_response": True,
             "response_handlers": step.get("response_handlers", {}),
@@ -1590,6 +1591,8 @@ class PitchDeliveryManager:
             "execution_time": datetime.now(),
             "step_metadata": step.get("execution_metadata", {})
         }
+
+        logging.info(f"PITCH_FLOW->_execute_single_step->Executing step {step['step_id']}: {natural_message}")
         
         # Handle special step types
         if step.get("step_type") == "booking":
@@ -3658,100 +3661,123 @@ class PitchAdaptationEngine(IFlowEngine):  # ADDED: Direct interface implementat
         if not is_ready:
             return {"status": "not_ready", "reason": reason, "readiness_score": readiness_score}
         
-        # ORIGINAL: Use pitch_customizer (no changes to component)
-        value_proposition = self.pitch_customizer.customize_value_proposition(
-            customer_context, 
-            flow_context.get("discovered_needs", []), 
-            customer_context.competitive_landscape
-        )
+        # Load JSON template
+        template_path = flow_context.get("playbook/pitch_flow.json", "pitch_flow.json")
+        flow_id = f"pitch_{session_id}"
+        conversation_template = self.pitch_customizer.load_conversation_template(template_path, flow_id)
         
-        proof_points = self.pitch_customizer.select_relevant_proof_points(
-            customer_context.industry, 0.8, ["credibility", "relevance"]
-        )
+        # NEW: Load and build conversation flow instead of pitch content
+        try:
+        # Load JSON template
+                template_path = flow_context.get("template_path", "playbook/pitch_flow.json")
+                flow_id = f"pitch_{session_id}"
+
+                conversation_template = self.pitch_customizer.load_conversation_template(template_path, flow_id)
+                
+                # Build customized flow
+                business_context = flow_context.get("business_context", {})
+                customized_flow = self.pitch_customizer.build_conversation_flow(
+                    flow_id, customer_context, business_context
+                )
+                
+                # Initialize conversation execution
+                flow_result = self.delivery_manager.execute_conversation_flow(
+                    session_id, customized_flow, customer_context
+                )
+                
+                # Store session state
+                self.active_sessions[session_id] = {
+                    "conversation_template": customized_flow,
+                    "flow_status": flow_result,
+                    "customer_context": customer_context,
+                    "start_time": datetime.now()
+                }
+                
+                return {
+                    "status": "initialized",
+                    "readiness_score": readiness_score,
+                    "conversation_flow": flow_result,
+                    "first_step": flow_result.get("first_step"),
+                    "customer_response": flow_result.get("first_step", {}).get("message", "Let me tell you about our opportunity..."),
+                    "next_action": "execute_conversation_step"
+                }
         
-        # ORIGINAL: Use delivery_manager (no changes to component)
-        pitch_content = PitchContent(
-            value_proposition=value_proposition,
-            proof_points=[pp.get("content", "") for pp in proof_points],
-            competitive_positioning=flow_context.get("competitive_positioning", []),
-            solution_benefits=flow_context.get("solution_benefits", [])
-        )
+        except Exception as e:
+            self.logger.error(f"Conversation flow initialization failed: {e}")
+            # Fallback to original pitch method
+            return self._fallback_to_original_pitch(session_id, customer_context, flow_context)
         
-        delivery_plan = self.delivery_manager.structure_pitch_for_voice_delivery(
-            pitch_content, flow_context.get("conversation_pacing", {"words_per_minute": 150})
-        )
+
+    def _get_template_path(self, customer_context: CustomerContext, flow_context: Dict[str, Any]) -> str:
         
-        # ADDED: Store session state for integration
-        self.active_sessions[session_id] = {
-            "pitch_content": pitch_content,
-            "delivery_plan": delivery_plan,
-            "current_segment": 0,
-            "customer_responses": [],
-            "start_time": datetime.now()
+        # Extract business interest from conversation
+        conversation_history = flow_context.get("conversation_history", [])
+        customer_speech = " ".join([h.get("message", "") for h in conversation_history if h.get("type") == "customer"]).lower()
+            
+        # Business-specific template mapping
+        template_mapping = {
+                "burger singh": "playbook/pitch_flow.json",
+                "franchise": "playbook/pitch_flow.json", 
+                "solar": "playbook/salesplaybook.json",
         }
+            
+        # Detect business type from customer speech
+        for business_key, template_path in template_mapping.items():
+            if business_key in customer_speech:
+                return template_path
+            
+        # Fallback to config-based selection
+        business_type = getattr(self.config, 'BUSINESS_TYPE', 'franchise')
+        return template_mapping.get(business_type, "playbook/pitch_flow.json")
         
-        return {
-            "status": "initialized",
-            "readiness_score": readiness_score,
-            "estimated_duration": delivery_plan.get("total_estimated_duration", 300),
-            "value_proposition": value_proposition,
-            "next_action": "begin_pitch_delivery"
-        }
-    
     def execute_flow_segment(self, session_id: str, customer_input: str, 
                            segment_context: Dict[str, Any]) -> Dict[str, Any]:
         """INTERFACE METHOD: Coordinate original components for execution"""
         
+
         if session_id not in self.active_sessions:
             return {"error": "Session not initialized"}
         
         session_data = self.active_sessions[session_id]
+        flow_context = segment_context.get('flow_context', {})
+        conversation_template = self.pitch_customizer.load_conversation_template(template_path, f"pitch_{session_id}")
+
+        template_path = self._get_template_path(segment_context.get('customer_context'), flow_context)
+
+        if conversation_template:
+            # Initialize conversation execution
+            customer_context = segment_context.get('customer_context')
+            business_context = segment_context.get('business_context', {})
+            
+            flow_result = self.delivery_manager.execute_conversation_flow(
+                session_id, conversation_template, customer_context
+            )
+            
+            # Extract message from first step
+            first_step = flow_result.get("first_step", {})
+            message = first_step.get("message", "")
+            
+            if message:
+                return {
+                    "status": "conversation_started",
+                    "customer_response": message,  # ← KEY: This is what orchestrator expects
+                    "message": message,
+                    "step_info": first_step,
+                    "execution_status": "completed"
+                }
+            # Continue conversation execution
+        step_result = self.delivery_manager.execute_conversation_step(session_id, customer_input)
         
-        # ORIGINAL: Use response_handler (no changes to component)
-        engagement_metrics = self.response_handler.monitor_customer_interest_signals(
-            {"customer_speech": customer_input}, 
-            session_data.get("engagement_metrics", {})
-        )
+        if step_result.get("message"):
+            return {
+                "status": "step_completed", 
+                "customer_response": step_result["message"],  # ← KEY: Extract template message
+                "message": step_result["message"],
+                "execution_status": "completed"
+            }
         
-        # ORIGINAL: Use delivery_manager (no changes to component)
-        current_segment = session_data["current_segment"]
-        segments = session_data["delivery_plan"].get("segments", [])
-        
-        if current_segment >= len(segments):
-            return self._finalize_pitch_delivery(session_id)
-        
-        segment_info = segments[current_segment]
-        
-        delivery_result = self.delivery_manager.deliver_knowledge_segment(
-            session_data["pitch_content"],
-            segment_context.get("delivery_style", "conversational"),
-            segment_context
-        )
-        
-        progression_decision = self.delivery_manager.manage_pitch_segment_progression(
-            segment_info.get("name", ""), 
-            {"customer_response": customer_input}, 
-            segments[current_segment + 1:]
-        )
-        
-        # Update session state
-        if progression_decision["action"] == "continue":
-            session_data["current_segment"] += 1
-        
-        session_data["engagement_metrics"] = engagement_metrics
-        session_data["customer_responses"].append({
-            "content": customer_input,
-            "timestamp": datetime.now(),
-            "engagement": engagement_metrics.get("overall_engagement", 0.5)
-        })
-        
-        return {
-            "status": "segment_completed",
-            "segment_delivered": segment_info.get("name", f"segment_{current_segment}"),
-            "engagement_metrics": engagement_metrics,
-            "progression_decision": progression_decision,
-            "segments_remaining": len(segments) - current_segment - 1
-        }
+        # Fallback
+        return {"error": "No template message generated"}
     
     def handle_interruption(self, session_id: str, interruption_type: str) -> Dict[str, Any]:
         """INTERFACE METHOD: Use original delivery_manager for interruptions"""
@@ -3870,4 +3896,37 @@ class PitchAdaptationEngine(IFlowEngine):  # ADDED: Direct interface implementat
             "completion_rate": completion_rate,
             "final_engagement": final_engagement,
             "next_action": next_action
+        }
+    
+    # In PitchAdaptationEngine class - ADD METHOD
+
+    def _fallback_to_original_pitch(self, session_id: str, customer_context: CustomerContext, 
+                                flow_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Fallback to original pitch method when conversation flow fails"""
+        # Use existing original initialization logic
+        value_proposition = self.pitch_customizer.customize_value_proposition(
+            customer_context, 
+            flow_context.get("discovered_needs", []), 
+            customer_context.competitive_landscape
+        )
+        
+        return {
+            "status": "initialized_fallback",
+            "value_proposition": value_proposition,
+            "next_action": "begin_pitch_delivery"
+        }
+
+    def _fallback_to_original_segment(self, session_id: str, customer_input: str, 
+                                    segment_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Fallback to original segment method when conversation flow fails"""
+        # Use existing original segment logic
+        session_data = self.active_sessions[session_id]
+        engagement_metrics = self.response_handler.monitor_customer_interest_signals(
+            {"customer_speech": customer_input}, 
+            session_data.get("engagement_metrics", {})
+        )
+        
+        return {
+            "status": "segment_completed_fallback",
+            "engagement_metrics": engagement_metrics
         }

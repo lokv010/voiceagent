@@ -9,9 +9,12 @@ import logging
 import json
 from datetime import datetime
 import os
+from pathlib import Path
 from typing import Dict, List, Optional
 import openai
 import asyncio
+from services.conv_engine.flow_models import CustomerContext
+
 
 
 class InboundCallHandler:
@@ -31,7 +34,12 @@ class InboundCallHandler:
             'not_interested': "I understand. Thank you for your time and have a great day!",
             'transfer_request': "I'll connect you with a specialist right away."
         }
+
+        self.conversation_templates = {}
+        self.template_cache = {}
+        self._load_conversation_templates()
         
+
         # Business rules
         self.business_hours = {'start': 9, 'end': 17, 'timezone': 'UTC'}
         self.agent_transfer_number = config.AGENT_TRANSFER_NUMBER
@@ -42,18 +50,20 @@ class InboundCallHandler:
         """Main inbound call handler - fast and intelligent"""
         try:
             caller_number = request_data.get('From', '').strip()
-            
+            clean_phone = caller_number.replace('+', '').replace(' ', '').replace('-', '')
+            session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{clean_phone}"
             # Get or create prospect context
             prospect_context = await self._get_prospect_context(caller_number)
             
             # Initialize call state
             call_state = {
+                'session_id':session_id,
                 'phone_number': caller_number,
                 'prospect_context': prospect_context,
                 'prospect_id': prospect_context['prospect_id'],
                 'call_type': 'inbound',
                 'conversation_history': [],
-                'start_time': datetime.utcnow(),
+                'start_time': datetime.now(),
                 'current_turn': 0,
                 'answered_by_human': True
             }
@@ -63,13 +73,15 @@ class InboundCallHandler:
             
             # Generate intelligent greeting
             greeting = await self._generate_smart_greeting(prospect_context)
+
+          
             
             # Log interaction
             call_state['conversation_history'].append({
                 'turn': 0,
                 'type': 'agent',
                 'message': greeting,
-                'timestamp': datetime.utcnow()
+                'timestamp': datetime.now()
             })
             
             call_state['current_turn'] += 1
@@ -86,10 +98,16 @@ class InboundCallHandler:
     async def handle_inbound_response(self, call_sid: str, request_data: Dict) -> str:
         """Handle customer responses with OpenAI intelligence"""
         try:
+
             if call_sid not in self.voice_bot.active_calls:
                 return self._handle_orphaned_request(request_data.get('SpeechResult', ''))
             
             call_state = self.voice_bot.active_calls[call_sid]
+            session_id = call_state.get('session_id')
+            if not session_id:
+                logging.error(f"SIB_SERVICE->handle_inbound_response->Session ID missing from call_state for {call_sid}")
+                return self._generate_fallback_response()
+
             customer_speech = request_data.get('SpeechResult', '').strip()
             confidence = float(request_data.get('Confidence', 0.0))
             logger.info(f"Customer speech: '{customer_speech}' (confidence: {confidence})")
@@ -103,7 +121,7 @@ class InboundCallHandler:
                 'type': 'customer',
                 'message': customer_speech,
                 'confidence': confidence,
-                'timestamp': datetime.utcnow()
+                'timestamp': datetime.now()
             })
             
             # Check for immediate actions (fast path)
@@ -122,7 +140,7 @@ class InboundCallHandler:
                         'turn': call_state['current_turn'],
                         'type': 'agent',
                         'message': 'Generated via orchestrator',
-                        'timestamp': datetime.utcnow(),
+                        'timestamp': datetime.now(),
                         'strategy': 'orchestrator_enhanced'
                     })
                     call_state['current_turn'] += 1
@@ -145,7 +163,7 @@ class InboundCallHandler:
                 'turn': call_state['current_turn'],
                 'type': 'agent',
                 'message': response,
-                'timestamp': datetime.utcnow(),
+                'timestamp': datetime.now(),
                 'strategy': 'openai_intelligent'
             })
             
@@ -239,39 +257,45 @@ class InboundCallHandler:
     
     async def _generate_openai_response(self, customer_input: str, call_state: Dict) -> str:
         """Generate intelligent response using OpenAI"""
+        logging.info("=== OPENAI RESPONSE GENERATION START ===")
         try:
             prospect = call_state['prospect_context']['prospect']
             conversation_history = call_state['conversation_history']
-            
+
+            # Get relevant template context (NEW)
+            template_context = self._get_relevant_template_context(customer_input, call_state)
+            logging.info(f"OPENAI_GEN: Template context length: {len(template_context)}")
+            if template_context:
+                logging.info("OPENAI_GEN: Using template-enhanced prompt")
+            else:
+                logging.warning("OPENAI_GEN: No template context - using basic prompt")
             # Build conversation context
             context_messages = []
             
             # System prompt - focused and effective
-            system_prompt = f"""You are Sarah, a professional AI assistant handling an INBOUND solar consultation call.
+            system_prompt = f"""You are Sarah, a professional AI assistant handling an INBOUND {self._get_business_type()} consultation call.
+                
+
 
 CUSTOMER INFO:
 - Name: {prospect.name or 'Unknown caller'}
 - Phone: {prospect.phone_number}
 - They called YOU (inbound = high intent)
 
-CONVERSATION GOALS:
-1. Understand why they called
-2. Qualify their solar needs (homeowner, electric bill, timeline)
-3. Build value and schedule next steps
-4. Keep responses conversational and helpful
-
-KEY GUIDELINES:
-- Be warm but professional
-- Ask ONE question at a time
-- Listen to their needs first
-- Focus on solar savings and benefits
-- If they want human agent, offer transfer immediately
-- Keep responses under 40 words for natural flow
 
 CURRENT SITUATION: Customer just said: "{customer_input}"
 
-Respond naturally and helpfully."""
+RESPONSE INSTRUCTIONS:
+1. Use the conversation template below as your response guide
+2. Adapt the template language to respond to their specific input
+3. Keep the warm, professional tone from the template
+4. Keep natural tone and enthusiasm as shown in the template
+{template_context}
 
+Respond using the template style above, adapted for their input."""
+            
+            logging.info(f"OPENAI_GEN: System prompt length: {len(system_prompt)}")
+            logging.info(f"OPENAI_GEN: Template context included: {'Yes' if template_context else 'No'}")
             context_messages.append({"role": "system", "content": system_prompt})
             
             # Add recent conversation history (last 6 exchanges)
@@ -285,7 +309,7 @@ Respond naturally and helpfully."""
             
             # Add current customer input
             context_messages.append({"role": "user", "content": customer_input})
-            
+            logging.info(f"OPENAI_GEN: Sending {len(context_messages)} messages to OpenAI")
             # Call OpenAI with optimized settings for speed
             response = await self.openai_client.chat.completions.create(
                 model="gpt-3.5-turbo",  # Faster than GPT-4
@@ -295,13 +319,32 @@ Respond naturally and helpfully."""
                 frequency_penalty=0.3,
                 presence_penalty=0.3
             )
-            
+
+            logging.info(f"OPENAI_GEN: Generated response: '{response.choices[0].message.content.strip()}'")
+            logging.info("=== OPENAI RESPONSE GENERATION COMPLETE ===")
             return response.choices[0].message.content.strip()
             
         except Exception as e:
             logging.error(f"OpenAI response generation error: {e}")
+            template_response = self._get_template_fallback_response(customer_input)
+            if template_response and template_response != customer_input:
+                logging.info(f"Using template fallback response: {template_response}")
+                return template_response
+                # FALLBACK: Original method if template fails
             return self._get_fallback_solar_response(customer_input)
-    
+        
+     #ADD method to determine business type
+    def _get_business_type(self) -> str:
+        return self.config.BUSINESS_TYPE or "business opportunity"
+
+    def _get_business_context(self) -> str:
+        business_contexts = {
+            "solar": "Focus on solar savings, homeownership, electric bills",
+            "franchise": "Focus on investment, experience, location, timeline",
+            "insurance": "Focus on coverage needs, current policies, family situation",
+            "burger franchise": "Focus on convincing customer to sell the franchise",
+        }
+        return business_contexts.get(os.getenv('BUSINESS_TYPE'), "General business consultation")
     async def _check_immediate_actions(self, customer_speech: str, call_state: Dict) -> Optional[str]:
         """Check for immediate actions that don't need OpenAI (fast path)"""
         speech_lower = customer_speech.lower()
@@ -315,7 +358,7 @@ Respond naturally and helpfully."""
                 'turn': call_state['current_turn'],
                 'type': 'agent',
                 'message': transfer_msg,
-                'timestamp': datetime.utcnow(),
+                'timestamp': datetime.now(),
                 'action': 'transfer'
             })
             
@@ -341,16 +384,38 @@ Respond naturally and helpfully."""
         prospect = prospect_context['prospect']
         
         if prospect.name and prospect.source != 'unknown_caller':
-            return f"Thank you for calling, {prospect.name}. This is Sarah from solar consultations. How can I help you today?"
+            return f"Thank you for calling, {prospect.name}. This is Sarah from {os.getenv('BUSINESS_NAME')}. How can I help you today?"
         else:
             return self.response_cache['greeting']
     
     def _get_fallback_solar_response(self, customer_input: str) -> str:
-        """Fallback solar responses when OpenAI is unavailable"""
+    
+        """Dynamic fallback based on business type"""
         input_lower = customer_input.lower()
-        
+        business_type = self.config.BUSINESS_TYPE
+        response_templates = {
+            "solar": {
+                "price": "What's your average monthly electric bill?",
+                "default": "Do you own your home?"
+            },
+            "franchise": {
+                "price": "What's your investment budget range?", 
+                "experience": "Do you have business or restaurant experience?",
+                "default": "Are you looking to open in a specific location?"
+            },
+            "insurance": {
+                "price": "What coverage amount are you considering?",
+                "default": "Tell me about your current insurance situation?"
+            }
+        }
+
+        templates = response_templates.get(business_type, response_templates["franchise"])
+
         if any(word in input_lower for word in ['price', 'cost', 'money', 'expensive']):
-            return "Great question about cost! Most homeowners save money from day one. What's your average monthly electric bill?"
+            templates.get("price", templates["default"])
+        
+        elif business_type == "franchise" and any(word in input_lower for word in ['experience', 'background']):
+            return templates.get("experience", templates["default"])
         
         elif any(word in input_lower for word in ['solar', 'panels', 'energy']):
             return "I'd love to help you with solar! First, do you own your home?"
@@ -362,7 +427,7 @@ Respond naturally and helpfully."""
             return "Perfect! Do you own your home?"
         
         else:
-            return "I'd be happy to help you explore solar options. Do you own your home?"
+            return templates["default"]
     
     def _should_end_conversation(self, customer_speech: str) -> bool:
         """Determine if conversation should end naturally"""
@@ -412,7 +477,7 @@ Respond naturally and helpfully."""
                     source=ProspectSource.WEBSITE_VISITOR.value,
                     qualification_score=35,  # Higher base for inbound
                     call_status='active',
-                    created_at=datetime.utcnow()
+                    created_at=datetime.now()
                 )
                 
                 session.add(new_prospect)
@@ -502,7 +567,7 @@ Respond naturally and helpfully."""
             conversation_data = {
                 'customer_responses': [h['message'] for h in call_state['conversation_history'] if h['type'] == 'customer'],
                 'total_turns': call_state['current_turn'],
-                'call_duration': (datetime.utcnow() - call_state['start_time']).total_seconds(),
+                'call_duration': (datetime.now() - call_state['start_time']).total_seconds(),
                 'answered_by_human': True,
                 'strategy_used': 'openai_intelligent'
             }
@@ -594,19 +659,48 @@ Respond naturally and helpfully."""
     async def _try_orchestrator_response(self, customer_speech: str, call_state: Dict) -> Optional[str]:
         """Try orchestrator-enhanced response generation"""
         try:
-            session_id = call_state.get('session_id', f"session_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}")
-            
+            session_id = call_state.get('session_id')
+            logging.info(f"IB_SERVICE->_try_orchestrator_response: Using session_id={session_id}")
+            logging.info(f"IB_SERVICE->_try_orchestrator_response: call_state keys={list(call_state.keys())}")
+            if not session_id:
+                logging.error("IB_SERVICE->_try_orchestrator_response->Session ID missing from call_state in orchestrator call")
+                return None
             # Initialize orchestrator session if needed
             if session_id not in self.orchestrator.state_manager.active_sessions:
                 customer_context = self._create_customer_context(call_state)
-                self.orchestrator.state_manager.initialize_conversation_flow('inbound_call', customer_context)
-            
+                initialized_session_id = self.orchestrator.state_manager.initialize_conversation_flow('inbound_call', customer_context,session_id)
+                if initialized_session_id != session_id:
+                        logging.error(f"IB_SERVICE->_try_orchestrator_response:Session ID mismatch: expected {session_id}, got {initialized_session_id}")
             # Process input through orchestrator
             result = self.orchestrator.process_customer_input(session_id, customer_speech)
-            
+            #process customer input through orchestrator log
+            logging.info(f"IB_SERVICE->_try_orchestrator_response:Orchestrator result keys: {result.keys() if result else 'None'}")
+            logging.info(f"IB_SERVICE->_try_orchestrator_response:Orchestrator result: {result}")
+
+
             if result.get('success') and result.get('execution_result', {}).get('customer_response'):
-                response_text = result['execution_result']['customer_response']
+
+                execution_result = result.get('execution_result', {})
+
+                # Extract response text from orchestrator result log
+                logging.info(f"Execution result keys: {result['execution_result'].keys()}")
+                logging.info(f"Execution result: {result['execution_result']}")
                 
+                response_text = (
+                                execution_result.get('customer_response') or 
+                                execution_result.get('message') or
+                                execution_result.get('response') or
+                                execution_result.get('step_result', {}).get('message') or
+                                execution_result.get('first_step', {}).get('message')
+    )
+                if response_text:
+
+                    logging.info(f"Using orchestrator response: {response_text}")
+                    # ... rest unchanged
+                else:
+                    logging.warning(f"No response text found in execution_result: {execution_result}")
+                    return None
+
                 # Update call state with orchestrator insights
                 call_state['orchestrator_insights'] = {
                     'classification': result.get('classification'),
@@ -624,7 +718,7 @@ Respond naturally and helpfully."""
 
     def _create_customer_context(self, call_state: Dict):
         """Convert call_state to CustomerContext for orchestrator"""
-        from flow_models import CustomerContext
+
         
         prospect = call_state['prospect_context']['prospect']
         return CustomerContext(
@@ -636,3 +730,261 @@ Respond naturally and helpfully."""
             pain_points=call_state.get('discovered_pain_points', []),
             goals=call_state.get('customer_goals', [])
         )
+    #Extended context base for openAI to refer template
+    # ADD: New template loading methods
+    def _load_conversation_templates(self):
+        """Load and cache conversation templates for OpenAI context"""
+        try:
+            template_paths = {
+                'franchise': 'playbook/pitch_flow.json',
+                'solar': 'playbook/salesplaybook.json',
+                'general': 'playbook/pitch_flow.json',
+                'burger': 'playbook/pitch_flow.json' # fallback
+            }
+            
+            business_type = getattr(self.config, 'BUSINESS_TYPE', 'general')
+            logging.info(f"Loading conversation template for business type: {business_type}")
+            template_path = template_paths.get(business_type, template_paths['general'])
+            logging.info(f"TEMPLATE_LOAD: Using template path: {template_path}")
+
+            if Path(template_path).exists():
+                logging.info(f"TEMPLATE_LOAD: Template file exists: {template_path}")
+                with open(template_path, 'r', encoding='utf-8') as f:
+                    template_data = json.load(f)
+                    logging.info(f"TEMPLATE_LOAD: JSON loaded successfully. Keys: {list(template_data.keys())}")
+                    
+                self.conversation_templates[business_type] = template_data
+                self._build_template_cache(template_data, business_type)
+
+                logging.info(f"TEMPLATE_LOAD: Successfully loaded template for {business_type}")
+                logging.info(f"TEMPLATE_LOAD: Cache keys created: {list(self.template_cache.get(business_type, {}).keys())}")
+                
+                logging.info(f"Loaded conversation template for {business_type}")
+            else:
+                logging.warning(f"Template file not found: {template_path}")
+                
+        except Exception as e:
+            logging.error(f"Error loading conversation templates: {e}")
+
+        
+    def _build_template_cache(self, template_data: Dict, business_type: str):
+        """Build efficient template cache for token optimization"""
+        try:
+            logging.info(f"CACHE_BUILD: Template data keys: {list(template_data.keys())}")
+            if 'conversation_flow' in template_data:
+                logging.info("CACHE_BUILD: Found 'conversation_flow' key")
+                flow_data = template_data['conversation_flow']
+                logging.info(f"CACHE_BUILD: Flow data keys: {list(flow_data.keys())}")
+                steps = flow_data.get('steps', [])
+                logging.info(f"CACHE_BUILD: Found {len(steps)} steps in conversation_flow")
+            elif 'steps' in template_data:
+                logging.info("CACHE_BUILD: Found direct 'steps' key")
+                steps = template_data['steps']
+                logging.info(f"CACHE_BUILD: Found {len(steps)} steps directly")
+            else:
+                logging.error("CACHE_BUILD: No 'conversation_flow' or 'steps' key found")
+                return
+            
+            cache = {
+                'greeting_steps': [],
+                'qualification_steps': [],
+                'engagement_steps': [],
+                'objection_responses': [],
+                'closing_steps': []
+            }
+            
+            for i, step in enumerate(steps):
+                logging.info(f"CACHE_BUILD: Processing step {i+1}: {step.get('step_id', 'unknown')}")
+            
+                step_type = step.get('step_type', 'general')
+                step_id = step.get('step_id', '')
+                message_variants = step.get('message_variants', [])
+            
+                logging.info(f"CACHE_BUILD: Step {i+1} - ID: {step_id}, Type: {step_type}, Messages: {len(message_variants)}")
+            
+                if not message_variants:
+                    logging.warning(f"CACHE_BUILD: Step {step_id} has no message_variants!")
+                    continue
+            
+                step_info = {
+                    'step_id': step_id,
+                    'messages': message_variants,
+                    'purpose': step.get('step_name', ''),
+                    'data_collection': step.get('data_collection', {})
+                }
+
+                # Enhanced categorization with logging
+                category = self._categorize_step_with_logging(step_id, step_type, i+1)
+                cache[category].append(step_info)
+                
+            for category, items in cache.items():
+                logging.info(f"CACHE_BUILD: {category}: {len(items)} items")
+                for item in items:
+                    logging.info(f"CACHE_BUILD:   - {item['step_id']}: {item['purpose']}")
+        
+            self.template_cache[business_type] = cache
+            logging.info("=== TEMPLATE CACHE BUILDING COMPLETE ===")
+    
+        except Exception as e:
+            logging.error(f"CACHE_BUILD: Error building template cache: {e}", exc_info=True)
+    
+    def _get_relevant_template_context(self, customer_input: str, call_state: Dict) -> str:
+        """Extract relevant template context for OpenAI (token-efficient)"""
+        logging.info("=== TEMPLATE CONTEXT EXTRACTION START ===")
+        try:
+            business_type = getattr(self.config, 'BUSINESS_TYPE', 'general')
+            logging.info(f"CONTEXT_EXTRACT: Business type: {business_type}")
+
+            if not hasattr(self, 'template_cache'):
+                logging.warning("template_cache not initialized, using empty context")
+                return ""
+            
+
+            logging.info(f"CONTEXT_EXTRACT: template_cache keys: {list(self.template_cache.keys())}")
+            cache = self.template_cache.get(business_type, {})
+            logging.info(f"CONTEXT_EXTRACT: Cache for {business_type}: {list(cache.keys())}")
+            if not cache:
+                logging.warning(f"No template cache for business_type: {business_type}")
+                return ""
+            
+            for category, items in cache.items():
+                logging.info(f"CONTEXT_EXTRACT: {category}: {len(items)} items")
+        
+            conversation_stage = self._determine_conversation_stage(customer_input, call_state)
+        
+            # FIX: The key mismatch issue
+            stage_to_cache_key = {
+                'greeting': 'greeting_steps',
+                'qualification': 'qualification_steps',
+                'engagement': 'engagement_steps',
+                'objection': 'objection_responses',
+                'closing': 'closing_steps'
+            }
+           
+            
+
+
+
+            cache_key = stage_to_cache_key.get(conversation_stage, 'qualification_steps')
+            logging.info(f"CONTEXT_EXTRACT: Stage '{conversation_stage}' -> Cache key '{cache_key}'")
+            relevant_steps = cache.get(cache_key, [])
+            logging.info(f"CONTEXT_EXTRACT: Found {len(relevant_steps)} relevant steps")
+            
+            if not relevant_steps:
+                logging.warning(f"CONTEXT_EXTRACT: No steps found for cache_key: {cache_key}")
+                # Try fallback to qualification
+                relevant_steps = cache.get('qualification_steps', [])
+                logging.info(f"CONTEXT_EXTRACT: Fallback to qualification_steps: {len(relevant_steps)} items")
+            
+            # Build concise context
+            context_parts = []
+            for i, step in enumerate(relevant_steps[:2]):  # Limit to 2 steps
+                logging.info(f"CONTEXT_EXTRACT: Processing step {i+1}: {step['step_id']}")
+            
+            if step['messages']:
+                example_msg = step['messages'][0]
+                context_parts.append(f"- {step['purpose']}: \"{example_msg}\"")
+                logging.info(f"CONTEXT_EXTRACT: Added context for {step['step_id']}")
+            else:
+                logging.warning(f"CONTEXT_EXTRACT: Step {step['step_id']} has no messages")
+        
+            if context_parts:
+                template_context = f"\nRELEVANT CONVERSATION PATTERNS:\n" + "\n".join(context_parts)
+                logging.info(f"CONTEXT_EXTRACT: Generated template context ({len(template_context)} chars)")
+                logging.info(f"CONTEXT_EXTRACT: Template context preview: {template_context[:200]}...")
+                return template_context
+            else:
+                logging.warning("CONTEXT_EXTRACT: No context parts generated")
+                return ""
+        
+        except Exception as e:
+            logging.error(f"CONTEXT_EXTRACT: Error getting template context: {e}", exc_info=True)
+            return ""
+        
+    def _determine_conversation_stage(self, customer_input: str, call_state: Dict) -> str:
+        """Determine current conversation stage for template selection"""
+        input_lower = customer_input.lower()
+        turn_count = call_state.get('current_turn', 0)
+        logging.info(f"STAGE_DETECT: Input: '{customer_input}' (turn {turn_count})")
+        # Early conversation
+        if turn_count <= 2:
+            return 'greeting'
+        
+        # Stage based on customer input signals
+        if turn_count <= 2:
+            stage = 'greeting'
+            logging.info(f"STAGE_DETECT: Early conversation -> {stage}")
+        elif any(word in input_lower for word in ['price', 'cost', 'money', 'expensive', 'budget']):
+            stage = 'qualification'
+            logging.info(f"STAGE_DETECT: Price/cost keywords -> {stage}")
+        elif any(word in input_lower for word in ['not interested', 'busy', 'not now', 'concern']):
+            stage = 'objection'
+            logging.info(f"STAGE_DETECT: Objection keywords -> {stage}")
+        elif any(word in input_lower for word in ['interested', 'tell me more', 'sounds good', 'yes']):
+            stage = 'engagement'
+            logging.info(f"STAGE_DETECT: Engagement keywords -> {stage}")
+        elif any(word in input_lower for word in ['when', 'next step', 'schedule', 'meet']):
+            stage = 'closing'
+            logging.info(f"STAGE_DETECT: Closing keywords -> {stage}")
+        else:
+            stage = 'qualification'
+            logging.info(f"STAGE_DETECT: Default -> {stage}")
+            # Default to qualification for middle conversation
+        return stage
+        
+    def _get_template_fallback_response(self, customer_input: str) -> str:
+        """Get fallback response using template patterns"""
+        try:
+            business_type = getattr(self.config, 'BUSINESS_TYPE', 'general')
+            cache = self.template_cache.get(business_type, {})
+            
+            input_lower = customer_input.lower()
+            
+            # Use template patterns for fallback
+            if 'price' in input_lower or 'cost' in input_lower:
+                qualification_steps = cache.get('qualification_steps', [])
+                for step in qualification_steps:
+                    if 'investment' in step['step_id'] or 'budget' in step['step_id']:
+                        if step['messages']:
+                            return step['messages'][0]
+            
+            elif 'not interested' in input_lower:
+                objection_steps = cache.get('objection_responses', [])
+                if objection_steps and objection_steps[0]['messages']:
+                    return objection_steps[0]['messages'][0]
+            
+            # Default to first qualification message
+            qualification_steps = cache.get('qualification_steps', [])
+            if qualification_steps and qualification_steps[0]['messages']:
+                return qualification_steps[0]['messages'][0]
+            
+        except Exception as e:
+            logging.error(f"Template fallback error: {e}")
+        
+        # Final fallback to existing method
+        return self._get_fallback_solar_response(customer_input)
+    
+    def _categorize_step_with_logging(self, step_id: str, step_type: str, step_num: int) -> str:
+        """Categorize step with detailed logging"""
+        
+        # Categorization logic with logging
+        if 'greeting' in step_id or 'consent' in step_id:
+            category = 'greeting_steps'
+            logging.info(f"CATEGORIZE: Step {step_num} ({step_id}) -> {category} (greeting/consent)")
+        elif 'qualification' in step_type or any(q in step_id for q in ['experience', 'investment', 'location']):
+            category = 'qualification_steps'
+            logging.info(f"CATEGORIZE: Step {step_num} ({step_id}) -> {category} (qualification)")
+        elif 'engagement' in step_type or 'motivation' in step_id:
+            category = 'engagement_steps'
+            logging.info(f"CATEGORIZE: Step {step_num} ({step_id}) -> {category} (engagement)")
+        elif 'objection' in step_type or 'concern' in step_id:
+            category = 'objection_responses'
+            logging.info(f"CATEGORIZE: Step {step_num} ({step_id}) -> {category} (objection)")
+        elif 'booking' in step_type or 'closing' in step_id or 'recap' in step_id:
+            category = 'closing_steps'
+            logging.info(f"CATEGORIZE: Step {step_num} ({step_id}) -> {category} (booking/closing)")
+        else:
+            category = 'qualification_steps'  # Default
+            logging.info(f"CATEGORIZE: Step {step_num} ({step_id}) -> {category} (default)")
+        
+        return category

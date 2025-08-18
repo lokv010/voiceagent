@@ -1,7 +1,38 @@
+# Python
+venv/
 __pycache__/
-botenv/lib/
-botenv/lib/
-requirements.txt
+botenv/
+botenv/lib/python3.12/
+*.py[cod]
+*.egg-info/
+*.egg
+
+*.pyd
 *.log
-chroma_knowledge/
+
+# Virtual environments
+botenv
+.botenv/
+
+# VSCode settings
+.vscode/
+
+# Byte-compiled / cached
+*.pyc
+*.pyo
+*.pyd
+*.pyd.d
+*.pyd.cpython-*
+
+# Logs and environments
 .env
+.env
+
+# Mac system files
+.DS_Store
+
+# Pytest cache
+.pytest_cache/
+
+# Jupyter notebooks
+.ipynb_checkpoints/

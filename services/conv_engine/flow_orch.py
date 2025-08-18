@@ -2,6 +2,8 @@
 GenericFlowCoordinator.py - Top level orchestration and state management classes
 """
 
+import os
+import re
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
 import logging
@@ -11,7 +13,7 @@ from .conv_interfaces import (
     FlowEngineRegistry, EventBus, ConversationEvent, IntegrationBridge,
     PerformanceFeedbackCollector
 )
-from .flow_models import FlowType, FlowStage, CustomerContext, ConversationState, FlowTransition, PerformanceMetrics, ConversationEvent, CustomerReadinessLevel
+from .flow_models import ClassificationResult, FlowType, FlowStage, CustomerContext, ConversationState, FlowTransition, PerformanceMetrics, ConversationEvent, CustomerReadinessLevel
 
 
 
@@ -28,10 +30,16 @@ class FlowStateManager:
     def initialize_conversation_flow(
         self, 
         call_type: str, 
-        customer_context: CustomerContext
+        customer_context: CustomerContext,
+        session_id: Optional[str] = None  # ← ADD THIS
+
     ) -> str:
         """Initialize a new conversation flow session"""
-        session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{customer_context.customer_id}"
+        
+        clean_customer_id = re.sub(r'[^\w\-]', '', customer_context.customer_id)
+
+        if session_id is None:
+            session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{customer_context.customer_id}"
         
         # Determine initial flow based on call type
         initial_flow = self._determine_initial_flow(call_type, customer_context)
@@ -158,7 +166,29 @@ class FlowStateManager:
         time_factor = min(1.0, (datetime.now() - session.last_updated).seconds / 300)  # 5 min max
         transition_factor = min(1.0, len(self.flow_history.get(session.session_id, [])) / 10)
         return max(0.1, 1.0 - time_factor - transition_factor * 0.1)
+    
+    def get_session_debug_info(self, session_id: str) -> Dict:
 
+        return {
+        "session_exists": session_id in self.active_sessions,
+        "active_session_count": len(self.active_sessions),
+        "active_session_ids": list(self.active_sessions.keys()),
+        "target_session_id": session_id
+        }
+
+    def cleanup_expired_sessions(self, max_age_minutes: int = 60):
+        """Remove sessions older than max_age_minutes"""
+        cutoff_time = datetime.now() - timedelta(minutes=max_age_minutes)
+        expired_sessions = []
+        
+        for session_id, session in self.active_sessions.items():
+            if session.last_updated < cutoff_time:
+                expired_sessions.append(session_id)
+        
+        for session_id in expired_sessions:
+            del self.active_sessions[session_id]
+            del self.flow_history[session_id]
+            self.logger.info(f"Cleaned up expired session {session_id}")
 
 class FlowTransitionController:
     """Controls transitions between conversation flows"""
@@ -369,15 +399,26 @@ class ConversationOrchestrator(IOrchestrationEngine):
     
     def process_customer_input(self, session_id: str, customer_input: str) -> Dict[str, Any]:
         """INTERFACE METHOD: Main integration entry point"""
+
+        logging.info(f"FLOW_ORCH->process_customer_input-> Processing customer input for session_id= {session_id},customer_input= {customer_input}")
+       
         session_state = self.state_manager.active_sessions.get(session_id)
+        debug_info= self.state_manager.get_session_debug_info(session_id)
+        logging.info(f"FLOW_ORCH->process_customer_input-> session debug info: {debug_info}")       
+        logging.info(f"FLOW_ORCH->process_customer_input-> session_state: {session_state}")
         if not session_state:
-            return {"error": "Session not found"}
+            return {"FLOW_ORCH->process_customer_input->error": "Session not found"}
+        
+
+        logging.info(f"FLOW_ORCH->process_customer_input-> Processing STEP 1: Classify input")
         # STEP 1: Classify using classification engine
         classification_result = self._classify_input(customer_input, session_id, session_state)
-        
+
+        logging.info(f"FLOW_ORCH->process_customer_input-> Processing STEP 2: Orchestration decision")
         # STEP 2: Make orchestration decision (uses existing methods)
         orchestration_decision = self._make_orchestration_decision(classification_result, session_id, session_state)
-        
+
+        logging.info(f"FLOW_ORCH->process_customer_input-> Processing STEP 3: Execution result")
         # STEP 3: Execute using appropriate engine
         execution_result = self._execute_flow_action(orchestration_decision, customer_input, session_id)
         
@@ -690,8 +731,14 @@ class ConversationOrchestrator(IOrchestrationEngine):
     
     def _classify_input(self, customer_input: str, session_id: str, session_state: ConversationState):
         """Use classification engine to analyze input"""
+
+        logging.info(f"FLOW_ORCH->_classify_input: Classifying input for session_id={session_id},customer_input= {customer_input},session_state={session_state}")
+       
         if not self.classification_engine:
             return self._fallback_classification(customer_input, session_state)
+        
+        if not hasattr(session_state, 'context_data'):
+            return self._fallback_classification(customer_input, None)
         
         try:
             conversation_history = self._get_conversation_history(session_id)
@@ -706,6 +753,7 @@ class ConversationOrchestrator(IOrchestrationEngine):
             )
         except Exception as e:
             self.logger.error(f"Classification failed: {e}")
+            logging.info("FLOW_ORCH->_classify_input: Classification engine failed, using fallback")
             return self._fallback_classification(customer_input, session_state)
     
     def _make_orchestration_decision(self, classification_result, session_id: str, session_state: ConversationState):
@@ -750,6 +798,7 @@ class ConversationOrchestrator(IOrchestrationEngine):
         if not engine:
             return {"error": f"No engine for {target_flow.value}"}
         
+        session_state=None
         try:
             session_state = self.state_manager.active_sessions[session_id]
             execution_context = self.integration_bridge.orchestration_to_engine(
@@ -760,7 +809,17 @@ class ConversationOrchestrator(IOrchestrationEngine):
                     "flow_context": orchestration_decision.get("context_updates", {})
                 },
                 target_flow.value
+            
             )
+            if target_flow == FlowType.PITCH:
+            # Set template path for pitch flows
+                execution_context["template_path"] = "playbook/pitch_flow.json"
+                execution_context["business_context"] = {
+                "business_name": os.getenv('BUSINESS_NAME','Burger King'),
+                "business_type": os.getenv('BUSINESS_TYPE','franchise'),
+                "currency": os.getenv('CURRENCY_SYMBOL','₹'),
+                "qualification_flow": os.getenv('QUALIFICATION_FLOWS', '').split(',') if os.getenv('QUALIFICATION_FLOWS') else []
+            }
             
             action = orchestration_decision["action"]
             
@@ -774,7 +833,7 @@ class ConversationOrchestrator(IOrchestrationEngine):
             return self.integration_bridge.engine_to_orchestration(result, target_flow.value)
             
         except Exception as e:
-            self.logger.error(f"Execution failed: {e}")
+            self.logger.error(f"FLOW_ORCH->_execute_flow_action Execution failed: {e}")
             return {"error": str(e)}
     
     def _collect_feedback(self, session_id: str, classification_result, execution_result) -> None:
@@ -802,7 +861,7 @@ class ConversationOrchestrator(IOrchestrationEngine):
     def _fallback_classification(self, customer_input: str, session_state: ConversationState):
         """Simple fallback when classification engine unavailable"""
         input_lower = customer_input.lower()
-        
+        logging.info("FLOW_ORCH->_fallback_classification: Using fallback classification")
         if any(word in input_lower for word in ["price", "cost"]):
             primary_flow = FlowType.KNOWLEDGE
         elif any(word in input_lower for word in ["but", "concerned"]):
@@ -812,7 +871,7 @@ class ConversationOrchestrator(IOrchestrationEngine):
         else:
             primary_flow = session_state.current_flow
         
-        from flow_classfier import ClassificationResult
+      
         return ClassificationResult(
             primary_flow=primary_flow,
             secondary_flows=[],

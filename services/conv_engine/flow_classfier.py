@@ -34,7 +34,7 @@ class ConversationAnalyzer:
         
         intents = []
         text_lower = conversation_text.lower()
-        
+        logging.info(f"flow_classifier->analyze_conversation_intent:Analyzing text: {conversation_text}")
         # Detect multiple intents in the conversation
         for intent_type, patterns in self.intent_patterns.items():
             confidence = self._calculate_intent_confidence(text_lower, patterns)

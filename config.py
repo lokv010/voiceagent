@@ -94,7 +94,17 @@ class Config:
     ENABLE_ORCHESTRATOR = os.getenv('ENABLE_ORCHESTRATOR', 'false').lower() == 'true'
     ORCHESTRATOR_CONFIDENCE_THRESHOLD = float(os.getenv('ORCHESTRATOR_THRESHOLD', '0.7'))
     ORCHESTRATOR_TIMEOUT = int(os.getenv('ORCHESTRATOR_TIMEOUT', '2000'))
+    BUSINESS_TYPE = "franchise"  # or "solar", "insurance" 
+    BUSINESS_NAME = "Burger Singh"
+    CURRENCY_SYMBOL = "₹"
+    
 
+    # Business-specific qualification flows
+    QUALIFICATION_FLOWS = {
+    "franchise": ["investment_comfort", "experience", "location", "timeline"],
+    "solar": ["homeowner", "electric_bill", "roof_condition", "timeline"], 
+    "insurance": ["coverage_needs", "current_policies", "family_size", "budget"]
+    }
     
     @staticmethod
     def validate_config():

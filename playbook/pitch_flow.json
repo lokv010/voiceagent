@@ -1,0 +1,346 @@
+{
+  "conversation_flow": {
+    "flow_id": "franchise_qualification",
+    "flow_name": "Franchise Partnership Qualification",
+    "flow_type": "structured_conversation",
+    "business_context": {
+      "industry": "food_franchise",
+      "objective": "qualification_and_booking",
+      "completion_goal": "meeting_scheduled"
+    },
+    "variables": {
+      "name": "{{customer_name}}",
+      "business_name": "Burger King",
+      "currency_symbol": "₹",
+      "investment_min": "10 lakhs",
+      "investment_max": "40 lakhs",
+      "currency": "₹ rupees"
+    },
+    "steps": [
+      {
+        "step_id": "greeting_consent",
+        "step_number": 1,
+        "step_name": "Greeting & Consent",
+        "step_type": "consent_gate",
+        "required": true,
+        "message_variants": [
+          "Hi {{name}} Thanks for getting in touch about joining the {{business_name}} family as a franchise partner! We're excited about your interest in starting your own burger business. Before I connect you with our manager, can I ask you a few quick questions to understand your plans better?",
+          "Hello {{name}}! Great to hear from you about the {{business_name}} franchise opportunity! I'd love to help you get connected with our team. Would it be okay if I asked a few quick questions first to make sure we give you the best guidance?",
+          "Hi there {{name}}!Thanks for your interest in {{business_name}} franchising! Before we set up your call with our franchise manager, I'd like to understand your goals better. Is it okay if I ask a few quick questions?"
+        ],
+        "response_handlers": {
+          "yes_responses": ["yes", "sure", "okay", "fine", "go ahead", "absolutely", "of course"],
+          "no_responses": ["no", "skip", "not now", "later", "direct call"],
+          "yes_action": {
+            "message": "Perfect! Let's get started.",
+            "next_step": "experience"
+          },
+          "no_action": {
+            "message": "No problem,Would you like me to book a call directly with our franchise manager instead?",
+            "branch_to": "meeting_booking"
+          }
+        },
+        "data_collection": {
+          "consent_given": "boolean",
+          "skip_qualification": "boolean"
+        }
+      },
+      {
+        "step_id": "experience",
+        "step_number": 2,
+        "step_name": "Business Experience",
+        "step_type": "qualification",
+        "required": true,
+        "message_variants": [
+          "{{business_name}} isn't just about burgers — it's about running a profitable, proven business with massive fan following. Some of our partners recovered their full investment in under 18 months. Have you ever run a food or retail business before?",
+          "Running a {{business_name}} franchise means joining a proven business model with incredible brand loyalty. Many of our partners see ROI within 18 months. Do you have any previous experience in food service or retail?",
+          "What makes {{business_name}} special is our track record - partners often recover investments quickly. Have you operated any food or retail businesses previously?"
+        ],
+        "response_handlers": {
+          "yes_responses": ["yes", "have experience", "ran business", "owned", "managed"],
+          "no_responses": ["no", "never", "first time", "no experience", "new to this"],
+          "yes_action": {
+            "message": "That's fantastic! That kind of experience will give you a great starting advantage when running your outlet.",
+            "next_step": "investment_comfort"
+          },
+          "no_action": {
+            "message": "That's perfectly fine — our team provides full operational training and ongoing support to help you succeed.",
+            "next_step": "investment_comfort"
+          }
+        },
+        "data_collection": {
+          "has_business_experience": "boolean",
+          "experience_type": "string",
+          "experience_years": "number"
+        }
+      },
+      {
+        "step_id": "investment_comfort",
+        "step_number": 3,
+        "step_name": "Investment Range",
+        "step_type": "qualification",
+        "required": true,
+        "message_variants": [
+          "Our typical franchise setup costs range between {{currency}}{{investment_min}} and {{currency}}{{investment_max}}. Would you be comfortable with this investment range?",
+          "The initial investment for a {{business_name}} franchise is typically {{currency}}{{investment_min}} to {{currency}}{{investment_max}}. Does this fit within your budget expectations?",
+          "To get started with {{business_name}}, most partners invest between {{currency}}{{investment_min}} and {{currency}}{{investment_max}}. Is this investment level something you'd be comfortable with?"
+        ],
+        "response_handlers": {
+          "yes_responses": ["yes", "comfortable", "within budget", "affordable", "can manage"],
+          "no_responses": ["no", "too much", "expensive", "high", "out of budget"],
+          "yes_action": {
+            "message": "Awesome! Let's continue.",
+            "next_step": "location"
+          },
+       
+        "no_action": {
+          "message": "I understand. We do have smaller format options. What investment range would work better for you?",
+          "follow_up": {
+            "condition": "still_too_high",
+            "message": "No problem! I'll send you information about our lower-cost options, and you can review when you're ready.",
+            "next_step": "conversation_end"
+          }
+        }   
+        },
+        "data_collection": {
+          "investment_comfortable": "boolean",
+          "needs_financing": "boolean",
+          "budget_concerns": "string"
+        }
+      },
+      {
+        "step_id": "location",
+        "step_number": 4,
+        "step_name": "Location Planning",
+        "step_type": "information_gathering",
+        "required": true,
+        "message_variants": [
+          "Do you already have a location in mind, or would you like our help finding one?",
+          "For your {{business_name}} outlet, do you have a specific location picked out, or would you prefer our team's assistance in site selection?",
+          "Regarding your store location - do you have a place in mind, or should our team help you identify the best spots?"
+        ],
+        "response_handlers": {
+          "has_location": ["have location", "already have", "specific place", "know where", "picked out"],
+          "needs_help": ["need help", "assistance", "suggestions", "don't know", "help me"],
+          "has_location_action": {
+            "message": "Perfect! Our team will assess the site and share feedback.",
+            "next_step": "outlet_count"
+          },
+          "needs_help_action": {
+            "message": "Got it! We can suggest high-potential locations based on our footfall and sales data.",
+            "next_step": "outlet_count"
+          }
+        },
+        "data_collection": {
+          "has_location": "boolean",
+          "location_details": "string",
+          "needs_location_help": "boolean"
+        }
+      },
+      {
+        "step_id": "outlet_count",
+        "step_number": 5,
+        "step_name": "Number of Outlets",
+        "step_type": "information_gathering",
+        "required": true,
+        "message_variants": [
+          "Are you interested in opening just one outlet to start, or are you considering multiple franchises?",
+          "Would you like to begin with a single {{business_name}} outlet, or are you thinking about multiple locations?",
+          "Are you planning to start with one franchise location, or do you have ambitions for multiple outlets?"
+        ],
+        "response_handlers": {
+          "single_outlet": ["one", "single", "just one", "start with one"],
+          "multiple_outlets": ["multiple", "several", "many", "more than one", "expand"],
+          "single_action": {
+            "next_step": "timeline"
+          },
+          "multiple_action": {
+            "next_step": "timeline"
+          }
+        },
+        "data_collection": {
+          "outlet_count": "string",
+          "expansion_plans": "boolean"
+        }
+      },
+      {
+        "step_id": "price_objection",
+        "step_type": "objection",
+        "message_variants": [
+          "I understand the investment seems significant. Many of our most successful partners felt the same way initially. What specific aspect of the investment concerns you most?",
+          "That's a fair concern about the investment. Let me explain how our partners typically see ROI within 18 months. What part would you like me to clarify?"
+        ]
+      },
+      {
+        "step_id": "timeline",
+        "step_number": 6,
+        "step_name": "Decision Timeline",
+        "step_type": "information_gathering",
+        "required": true,
+        "message_variants": [
+          "What's your expected timeline for making a decision and getting operations started?",
+          "How soon are you looking to make a decision and open your {{business_name}} franchise?",
+          "What timeframe are you working with for making your franchise decision and launching?"
+        ],
+        "response_handlers": {
+          "immediate": ["asap", "immediately", "right away", "soon", "quickly"],
+          "short_term": ["1-3 months", "few months", "this quarter", "soon"],
+          "medium_term": ["3-6 months", "later this year", "next quarter"],
+          "long_term": ["next year", "6+ months", "still exploring", "not sure"],
+                  "immediate_action": {
+            "message": "Excellent! We can move quickly for motivated partners.",
+            "next_step": "operations_role"
+          },
+                  "long_term_action": {
+          "message": "That's fine - it's good to plan ahead. Let me continue with a few more questions.",
+          "next_step": "operations_role"
+        },
+          "default_action": {
+            "next_step": "operations_role"
+          }
+        },
+        "data_collection": {
+          "decision_timeline": "string",
+          "urgency_level": "string"
+        }
+      },
+      {
+        "step_id": "operations_role",
+        "step_number": 7,
+        "step_name": "Operations Management",
+        "step_type": "information_gathering",
+        "required": true,
+        "message_variants": [
+          "Do you plan on managing the outlet yourself, or will you hire a manager to handle daily operations?",
+          "Would you be hands-on managing the day-to-day operations, or are you planning to hire an operations manager?",
+          "Are you looking to be directly involved in running the outlet, or would you prefer to hire someone to manage operations?"
+        ],
+        "response_handlers": {
+          "self_manage": ["myself", "personally", "hands-on", "directly involved", "manage myself"],
+          "hire_manager": ["hire manager", "get someone", "delegate", "hire staff", "not directly"],
+          "default_action": {
+            "next_step": "motivation"
+          }
+        },
+        "data_collection": {
+          "operations_role": "string",
+          "involvement_level": "string"
+        }
+      },
+      {
+        "step_id": "motivation",
+        "step_number": 8,
+        "step_name": "Motivation & Interest",
+        "step_type": "engagement",
+        "required": true,
+        "message_variants": [
+          "And finally — what excites you the most about joining the burger business?",
+          "Last question — what drew you to the {{business_name}} franchise opportunity?",
+          "Finally, I'm curious — what excites you most about starting your own {{business_name}} franchise?"
+        ],
+        "response_handlers": {
+          "default_action": {
+            "next_step": "recap_booking"
+          }
+        },
+        "data_collection": {
+          "motivation": "string",
+          "key_interests": "array"
+        }
+      },
+      {
+        "step_id": "recap_booking",
+        "step_number": 9,
+        "step_name": "Recap & Meeting Request",
+        "step_type": "transition_to_booking",
+        "required": true,
+        "message_variants": [
+          "Thanks for sharing, {{name}}! From what you've told me, we're confident you'd do amazingly well in {{location}}. When would you like me to schedule your meeting with our franchise manager?",
+          "Thank you {{name}}! Based on your responses, I think you'd be a great fit for {{business_name}}. Shall I set up a meeting with our franchise team to discuss next steps?",
+          "Perfect, {{name}}! You sound like exactly the kind of partner we love working with. Would you like me to arrange a meeting with our franchise manager?"
+        ],
+        "response_handlers": {
+          "yes_responses": ["yes", "schedule", "book", "arrange", "set up"],
+          "no_responses": ["not now", "later", "think about it", "need time"],
+          "yes_action": {
+            "next_step": "slot_confirmation"
+          },
+          "no_action": {
+            "message": "No problem! I'll send you our information package, and you can reach out when you're ready.",
+            "next_step": "conversation_end"
+          }
+        },
+        "data_collection": {
+          "wants_meeting": "boolean"
+        }
+      },
+            {
+        "step_id": "conversation_recovery",
+        "step_type": "recovery",
+        "message_variants": [
+          "I sense you might have some concerns. What questions can I answer to help you feel more comfortable?",
+          "It sounds like you're not sure about something. What would be most helpful to discuss?"
+        ]
+      },
+      {
+        "step_id": "slot_confirmation",
+        "step_number": 10,
+        "step_name": "Meeting Slot Selection",
+        "step_type": "booking",
+        "required": true,
+        "message_variants": [
+          "Let me quickly check the available slots for you...",
+          "I'll look up our franchise manager's availability...",
+          "Checking available meeting times for you..."
+        ],
+        "follow_up_message": {
+          "message": "Here are the available meeting times:",
+          "options": [
+            "1️⃣ Wednesday – 3 PM",
+            "2️⃣ Friday – 11 AM", 
+            "3️⃣ Saturday – 5 PM"
+          ],
+          "question": "Which one works best for you?"
+        },
+        "response_handlers": {
+          "slot_selection": ["1", "2", "3", "wednesday", "friday", "saturday"],
+          "selection_action": {
+            "message": "Great  I've booked your meeting for {{chosen_slot}}. You'll receive a confirmation shortly along with the next steps.",
+            "next_step": "conversation_end"
+          }
+        },
+        "data_collection": {
+          "selected_slot": "string",
+          "meeting_scheduled": "boolean"
+        }
+      }
+    ],
+    "conversation_end": {
+      "success_message": "Thank you {{name}}! We're excited to meet you and discuss your {{business_name}} franchise journey. You'll receive all the details shortly. Have a great day!",
+      "completion_data": {
+        "conversation_completed": true,
+        "qualification_status": "completed",
+        "next_action": "meeting_scheduled"
+      }
+    },
+        "fallback_responses": {
+      "unclear_response": [
+        "I didn't quite catch that. Could you say that again?",
+        "Sorry, could you repeat that for me?",
+        "I want to make sure I understand - could you clarify?"
+      ],
+      "off_topic": [
+        "Great question! I'll make sure our franchise manager covers that. Let me finish these quick questions first.",
+        "I'll note that for your meeting. Let's continue with the setup questions."
+      ],
+      "not_interested": [
+        "I understand this might not be the right time. Would you like me to send you information to review later?",
+        "No problem at all. Thanks for your time today!"
+      ],
+      "price_shock": [
+        "I know it seems like a big number. Many successful partners started with the same concern. Would you like to hear how they made it work?",
+        "That's understandable. We have financing partners and flexible options. Should I have our manager explain those?"
+      ]
+    }
+  }
+}
