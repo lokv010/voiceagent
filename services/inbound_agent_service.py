@@ -8,6 +8,7 @@ from asyncio.log import logger
 import logging
 import json
 from datetime import datetime
+import time
 import os
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -128,29 +129,35 @@ class InboundCallHandler:
             immediate_response = await self._check_immediate_actions(customer_speech, call_state)
             if immediate_response:
                 return immediate_response
-            
-            logger.info("Generating OpenAI response")
 
-            # NEW: Try orchestrator first if available
-            if hasattr(self, 'orchestrator_enabled') and self.orchestrator_enabled:
-                orchestrated_response = await self._try_orchestrator_response(customer_speech, call_state)
-                if orchestrated_response:
-                    # Log orchestrator success
-                    call_state['conversation_history'].append({
-                        'turn': call_state['current_turn'],
-                        'type': 'agent',
-                        'message': 'Generated via orchestrator',
-                        'timestamp': datetime.now(),
-                        'strategy': 'orchestrator_enhanced'
-                    })
-                    call_state['current_turn'] += 1
-                    logger.info("Generating orchestrator response successful")
-                    return orchestrated_response
+            logger.info("Generating Claude proactive response")
 
-            # EXISTING: Generate intelligent response using OpenAI (unchanged)
-            logger.info("Using OpenAI response generation")
+            # NEW: Try Claude engine first (replaces orchestrator)
+            claude_response = await self._try_claude_response(customer_speech, call_state, session_id)
+            logger.info(f"Claude response: {claude_response}")
+            if claude_response:
+                # Log Claude success
+                call_state['conversation_history'].append({
+                    'turn': call_state['current_turn'],
+                    'type': 'agent',
+                    'message': claude_response,
+                    'timestamp': datetime.now(),
+                    'strategy': 'claude_proactive'
+                })
+                call_state['current_turn'] += 1
+                logger.info("Claude proactive response generated successfully")
+                
+                # Check if conversation should end
+                # if call_state['current_turn'] >= 12 or self._should_end_conversation(customer_speech):
+                #     return await self._end_conversation(call_sid, call_state, claude_response)
+                
+                return self.voice_bot.twilio_handler.generate_twiml_response(
+                    claude_response, gather_input=True, timeout=12
+                )
+
             
-            response = await self._generate_openai_response(customer_speech, call_state)
+            logger.info("Claude failed generating OpenAI response")
+            # response = await self._generate_openai_response(customer_speech, call_state)
             try:
                 response = await self._generate_openai_response(customer_speech, call_state)
                 logger.info(f"OpenAI generated response: '{response}'")
@@ -440,24 +447,24 @@ Respond using the template style above, adapted for their input."""
         
         return any(signal in speech_lower for signal in ending_signals)
     
-    async def _end_conversation(self, call_sid: str, call_state: Dict, final_message: str) -> str:
-        """End conversation and cleanup"""
-        try:
-            if call_sid:
-                # Calculate and save results
-                call_results = await self._calculate_call_results(call_sid, call_state)
-                await self._save_call_results(call_sid, call_state, call_results)
+    # async def _end_conversation(self, call_sid: str, call_state: Dict, final_message: str) -> str:
+    #     """End conversation and cleanup"""
+    #     try:
+    #         if call_sid:
+    #             # Calculate and save results
+    #             call_results = await self._calculate_call_results(call_sid, call_state)
+    #             await self._save_call_results(call_sid, call_state, call_results)
                 
-                # Cleanup
-                del self.voice_bot.active_calls[call_sid]
+    #             # Cleanup
+    #             del self.voice_bot.active_calls[call_sid]
             
-            return self.voice_bot.twilio_handler.generate_twiml_response(
-                final_message, gather_input=False
-            )
+    #         return self.voice_bot.twilio_handler.generate_twiml_response(
+    #             final_message, gather_input=False
+    #         )
             
-        except Exception as e:
-            logging.error(f"Error ending conversation: {e}")
-            return self._generate_fallback_response()
+    #     except Exception as e:
+    #         logging.error(f"Error ending conversation: {e}")
+    #         return self._generate_fallback_response()
     
     async def _get_prospect_context(self, phone_number: str) -> Dict:
         """Get or create prospect context quickly"""
@@ -988,3 +995,201 @@ Respond using the template style above, adapted for their input."""
             logging.info(f"CATEGORIZE: Step {step_num} ({step_id}) -> {category} (default)")
         
         return category
+    
+    #Claude Haiku integration
+    async def _try_claude_response(self, customer_speech: str, call_state: dict, session_id: str) -> str:
+        """Try to generate response using Claude proactive engine"""
+        try:
+            # Initialize Claude engine if not exists
+            if not hasattr(self, 'claude_engine'):
+                api_key = os.getenv('ANTHROPIC_API_KEY')
+                if not api_key:
+                    logger.warning("ANTHROPIC_API_KEY not set, skipping Claude engine")
+                    return None
+                from .claude_haiku.FastClassificationEngine import ProactiveConversationService
+                self.claude_engine = ProactiveConversationService(api_key)
+            
+            # Convert call_state to Claude-compatible format
+            claude_session_data = self._convert_to_claude_format(call_state)
+            
+            # Get proactive response from Claude (single function call)
+            start_time = time.time()
+            result = await self.claude_engine.handle_customer_interaction(
+                customer_speech, 
+                session_id
+            )
+            
+            processing_time = (time.time() - start_time) * 1000
+            logger.info(f"Claude processing time: {processing_time:.0f}ms")
+            
+            # Update call_state with Claude conversation data
+            self._update_call_state_from_claude(call_state, result)
+            
+            # Return Claude's response if successful
+            if result.get('agent_response') and result.get('conversation_continues', True):
+                return result['agent_response']
+            
+            # Claude indicates call should end
+            if result.get('call_completed', False):
+                call_state['claude_completion'] = True
+                return result.get('agent_response', "Thank you for your interest. We'll follow up soon.")
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Claude engine error: {e}")
+            return None
+
+    def _convert_to_claude_format(self, call_state: dict) -> dict:
+        """Convert call_state format to Claude engine format (minimal conversion)"""
+        try:
+            # Extract conversation history in Claude format
+            conversation_history = []
+            for entry in call_state.get('conversation_history', []):
+                if entry.get('type') == 'customer':
+                    conversation_history.append({
+                        'role': 'customer', 
+                        'message': entry.get('message', ''),
+                        'timestamp': entry.get('timestamp', time.time())
+                    })
+                elif entry.get('type') == 'agent':
+                    conversation_history.append({
+                        'role': 'agent', 
+                        'message': entry.get('message', ''),
+                        'timestamp': entry.get('timestamp', time.time())
+                    })
+            
+            # Determine current stage based on turn count (simple heuristic)
+            turn_count = call_state.get('current_turn', 0)
+            if turn_count <= 2:
+                current_stage = 'GREETING'
+            elif turn_count <= 6:
+                current_stage = 'DISCOVERY'
+            elif turn_count <= 10:
+                current_stage = 'PRESENTATION'
+            else:
+                current_stage = 'CLOSING'
+            
+            return {
+                'conversation_history': conversation_history,
+                'customer_data': call_state.get('customer_data', {}),
+                'current_stage': current_stage,
+                'session_start': call_state.get('call_start_time', time.time())
+            }
+            
+        except Exception as e:
+            logger.error(f"Format conversion error: {e}")
+            return {
+                'conversation_history': [],
+                'customer_data': {},
+                'current_stage': 'GREETING',
+                'session_start': time.time()
+            }
+
+    def _update_call_state_from_claude(self, call_state: dict, claude_result: dict):
+        """Update call_state with insights from Claude (lightweight update)"""
+        try:
+            # Update customer data if Claude extracted new information
+            if claude_result.get('customer_data'):
+                if 'customer_data' not in call_state:
+                    call_state['customer_data'] = {}
+                call_state['customer_data'].update(claude_result['customer_data'])
+            
+            # Track Claude conversation stage
+            if claude_result.get('current_stage'):
+                call_state['claude_stage'] = claude_result['current_stage']
+            
+            # Track processing metrics
+            if claude_result.get('processing_time_ms'):
+                call_state['last_claude_time_ms'] = claude_result['processing_time_ms']
+            
+            # Track conversation quality
+            if claude_result.get('conversation_length'):
+                call_state['claude_conversation_length'] = claude_result['conversation_length']
+                
+        except Exception as e:
+            logger.error(f"Call state update error: {e}")
+
+    def _should_end_conversation(self, customer_speech: str) -> bool:
+        """Enhanced conversation ending detection (includes Claude insights)"""
+        speech_lower = customer_speech.lower()
+        
+        # Explicit ending signals
+        ending_phrases = [
+            'thank you', 'goodbye', 'bye', 'that\'s all', 
+            'i\'ll think about it', 'not interested', 
+            'call me back', 'send information', 'i\'m done'
+        ]
+        
+        if any(phrase in speech_lower for phrase in ending_phrases):
+            return True
+        
+        # Check if Claude indicated completion
+        for call_state in self.voice_bot.active_calls.values():
+            if call_state.get('claude_completion', False):
+                return True
+        
+        return False
+
+    async def _end_conversation(self, call_sid: str, call_state: dict, final_response: str) -> str:
+        """Enhanced conversation ending with Claude insights"""
+        try:
+            # Log conversation summary
+            logger.info(f"Ending conversation {call_sid}")
+            logger.info(f"Total turns: {call_state.get('current_turn', 0)}")
+            logger.info(f"Claude stage: {call_state.get('claude_stage', 'unknown')}")
+            logger.info(f"Customer data: {call_state.get('customer_data', {})}")
+            
+            # Cleanup Claude session if exists
+            if hasattr(self, 'claude_engine'):
+                session_id = call_state.get('session_id')
+                if session_id and session_id in self.claude_engine.session_data:
+                    # Export for CRM before cleanup
+                    conversation_summary = self.claude_engine.get_session_summary(session_id)
+                    call_state['claude_summary'] = conversation_summary
+                    
+                    # Cleanup session data
+                    del self.claude_engine.session_data[session_id]
+            
+            # Remove from active calls
+            if call_sid in self.voice_bot.active_calls:
+                del self.voice_bot.active_calls[call_sid]
+            
+            # Generate final TwiML (no gather, conversation ends)
+            return self.voice_bot.twilio_handler.generate_twiml_response(
+                final_response, gather_input=False, timeout=0
+            )
+            
+        except Exception as e:
+            logger.error(f"Error ending conversation: {e}")
+            return self.voice_bot.twilio_handler.generate_twiml_response(
+                "Thank you for calling. Goodbye!", gather_input=False
+            )
+
+    async def cleanup_claude_engine(self):
+        """Cleanup Claude engine resources"""
+        try:
+            if hasattr(self, 'claude_engine'):
+                await self.claude_engine.close()
+                self.claude_engine = None
+                logger.info("Claude engine cleaned up successfully")
+        except Exception as e:
+            logger.error(f"Claude engine cleanup error: {e}")
+            if hasattr(self, 'claude_engine'):
+                self.claude_engine = None
+
+    # Optional: Initialize Claude engine at service startup for faster first response
+    def initialize_claude_engine(self):
+        """Pre-initialize Claude engine for faster response times"""
+        try:
+            api_key = os.getenv('ANTHROPIC_API_KEY')
+            if api_key:
+                from .claude_haiku.FastClassificationEngine import ProactiveConversationService
+                self.claude_engine = ProactiveConversationService(api_key)
+                logger.info("Claude engine pre-initialized")
+            else:
+                logger.warning("ANTHROPIC_API_KEY not set, Claude engine will be lazy-loaded")
+                self.claude_engine = None
+        except Exception as e:
+            logger.error(f"Claude engine initialization error: {e}")
+            self.claude_engine = None

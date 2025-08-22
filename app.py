@@ -421,6 +421,7 @@ def _generate_contextual_fallback(speech_result: str, confidence: str) -> str:
                 <Say voice="Polly.Joanna">How can I help you today?</Say>
             </Gather>
         </Response>'''
+    
 def _generate_basic_response_fallback(speech_result):
     """Generate contextual fallback response"""
     try:
@@ -599,7 +600,7 @@ def inbound_call_status():
             if call_sid in voice_bot.active_calls:
                 call_state = voice_bot.active_calls[call_sid]
                 call_state['call_outcome'] = call_status
-                call_state['end_time'] = datetime.utcnow()
+                call_state['end_time'] = datetime.now()
                 call_state['duration'] = duration
                 
                 # Schedule delayed cleanup (30 seconds)
@@ -640,11 +641,11 @@ def get_call_states():
             call_details.append({
                 'call_sid': call_sid,
                 'phone_number': call_state.get('phone_number', 'unknown'),
-                'start_time': call_state.get('start_time', datetime.utcnow()).isoformat(),
+                'start_time': call_state.get('start_time', datetime.now()).isoformat(),
                 'current_turn': call_state.get('current_turn', 0),
                 'conversation_stage': call_state.get('conversation_stage', 'unknown'),
                 'call_outcome': call_state.get('call_outcome'),
-                'duration_seconds': int((datetime.utcnow() - call_state.get('start_time', datetime.utcnow())).total_seconds()) if call_state.get('start_time') else 0
+                'duration_seconds': int((datetime.now() - call_state.get('start_time', datetime.now())).total_seconds()) if call_state.get('start_time') else 0
             })
         
         return jsonify({

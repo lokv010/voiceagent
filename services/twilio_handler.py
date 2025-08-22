@@ -1,6 +1,10 @@
+import hashlib
+import os
+from flask import url_for
 from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.base.exceptions import TwilioException
+from services.azure_speech import AzureSpeechProcessor  
 import logging
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -15,6 +19,10 @@ class TwilioVoiceHandler:
         
         # Initialize Twilio client
         self.client = Client(account_sid, auth_token)
+
+       
+        
+
         
         # Verify phone number
         try:
@@ -79,8 +87,19 @@ class TwilioVoiceHandler:
                                timeout: int = 10, action_url: str = None,enable_partial: bool = True) -> str:
         """Generate TwiML response for voice interaction"""
         try:
-            response = VoiceResponse()
+
             
+            response = VoiceResponse()
+             #Azure Speech Services initialization
+            azure_tts = AzureSpeechProcessor(os.getenv("AZURE_SPEECH_KEY"), os.getenv("AZURE_SPEECH_REGION"))
+            text = message
+            audio_dir = os.path.join(os.getcwd(), "static", "audio")
+            os.makedirs(audio_dir, exist_ok=True)
+            audio_file = f"static/audio/hello.wav"
+            azure_tts.synthesize_to_file(text,audio_file)
+            
+            audio_url = "https://cd7d958042d2.ngrok-free.app/static/audio/hello.wav"
+
             if gather_input:
                 # Configure speech gathering
                 action_url = action_url or f"{self.webhook_url}/inbound-webhook/process"
@@ -90,7 +109,7 @@ class TwilioVoiceHandler:
                     action=action_url,
                     method='POST',
                     timeout=timeout,
-                    speech_timeout=2,  # Silence after speech
+                    speech_timeout=timeout,  # Silence after speech
                     language='en-US',
                     enhanced=True,  # Use enhanced speech recognition
                     speech_model='phone_call',  # Optimized for phone calls
@@ -99,28 +118,15 @@ class TwilioVoiceHandler:
                     )
                 
                 # Say the message and wait for response
-                gather.say(
-                    message, 
-                    voice='Polly.Joanna',  # High-quality neural voice
-                    language='en-US'
-                )
-                
+                gather.play(audio_url)
                 response.append(gather)
-                
-                # Fallback if no input is received
-                response.say(
-                    "I didn't receive any input. Thank you for your time. Goodbye.",
-                    voice='Polly.Joanna'
-                )
+                response.say("We did not receive a response. Goodbye.", voice='Polly.Joanna', language='en-US')
                 response.hangup()
+
                 
             else:
                 # Just say message and hangup
-                response.say(
-                    message, 
-                    voice='Polly.Joanna',
-                    language='en-US'
-                )
+                response.play(audio_url)
                 response.hangup()
             
             return str(response)

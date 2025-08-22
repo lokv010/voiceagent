@@ -21,7 +21,6 @@ class AzureSpeechProcessor:
             speechsdk.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs, 
             "3000"
         )
-        
         # Enable detailed recognition results
         self.speech_config.output_format = speechsdk.OutputFormat.Detailed
         
@@ -247,3 +246,13 @@ class AzureSpeechProcessor:
         except Exception as e:
             logging.error(f"Language detection error: {str(e)}")
             return {'language': 'en', 'confidence': 0.9}
+        
+    
+    def synthesize_to_file(self, text, filename):
+        audio_config = speechsdk.AudioConfig(filename=filename)
+        synthesizer = speechsdk.SpeechSynthesizer(speech_config=self.tts_config, audio_config=audio_config)
+
+        result = synthesizer.speak_text_async(text).get()
+        if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted:
+            raise Exception(f"Synthesis failed: {result.reason}")
+        return filename
